@@ -421,26 +421,35 @@ def webhook():
         logger.error(f"Webhook error: {e}")
         return "Error", 500
 
-def set_webhook():
-    """Устанавливает webhook при запуске"""
+# ==================== Запуск webhook вне блока if __name__ ====================
+# Это выполнится при импорте (gunicorn) и при прямом запуске (python)
+
+def init_webhook():
+    """Инициализация webhook - вызывается и gunicorn и python"""
     try:
         app_url = os.environ.get("RENDER_EXTERNAL_URL", "")
         if not app_url:
-            logger.warning("RENDER_EXTERNAL_URL не найден, пропускаю webhook")
+            logger.warning("RENDER_EXTERNAL_URL не найден")
             return
         
+        # Удаляем старый webhook
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
+        time.sleep(1)
+        
+        # Устанавливаем новый
         webhook_url = f"{app_url}/webhook"
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
-        resp = requests.get(url, timeout=10)
-        logger.info(f"Webhook установлен: {resp.json()}")
+        resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
+        logger.info(f"✅ Webhook установлен: {resp.json()}")
     except Exception as e:
-        logger.error(f"Ошибка установки webhook: {e}")
+        logger.error(f"Ошибка webhook: {e}")
+
+# Запускаем webhook сразу при загрузке модуля
+init_webhook()
+
+# Запускаем keep_alive в фоне
+threading.Thread(target=keep_alive, daemon=True).start()
+
+# Для прямого запуска python bot.py
 if __name__ == "__main__":
-    # Запускаем webhook
-    set_webhook()
-    # Запускаем keep_alive в фоне
-    threading.Thread(target=keep_alive, daemon=True).start()
-    
-    # Flask должен быть в основном потоке для gunicorn
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
