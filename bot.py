@@ -74,20 +74,36 @@ def extract_image_from_article(url: str) -> str | None:
     try:
         resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
         resp.raise_for_status()
+        html = resp.text
+        
         # og:image
-        m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', resp.text, re.I)
+        m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html, re.I)
         if m and m.group(1).startswith("http"):
+            logger.info(f"✅ og:image: {m.group(1)[:80]}")
             return m.group(1)
+        
         # twitter:image
-        m = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', resp.text, re.I)
+        m = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', html, re.I)
         if m and m.group(1).startswith("http"):
+            logger.info(f"✅ twitter:image: {m.group(1)[:80]}")
             return m.group(1)
-        # Первая img с расширением картинки
-        m = re.search(r'<img[^>]+src="([^"]+\.(?:jpg|jpeg|png|webp))"', resp.text, re.I)
-        if m and m.group(1).startswith("http"):
-            return m.group(1)
-    except Exception:
-        pass
+        
+        # Любая картинка из статьи
+        imgs = re.findall(r'<img[^>]+src="([^"]+)"', html, re.I)
+        for img in imgs:
+            if any(img.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
+                if img.startswith("http") and "icon" not in img.lower() and "avatar" not in img.lower() and "logo" not in img.lower():
+                    logger.info(f"✅ img из статьи: {img[:80]}")
+                    return img
+        
+        # Ссылка на Reddit картинку (i.redd.it или preview.redd.it)
+        m = re.search(r'https?://(?:i\.redd\.it|preview\.redd\.it)/[^"\s]+', html, re.I)
+        if m:
+            logger.info(f"✅ Reddit картинка: {m.group(0)[:80]}")
+            return m.group(0)
+            
+    except Exception as e:
+        logger.warning(f"Поиск картинки: {e}")
     return None
 
 def download_image_bytes(url: str) -> BytesIO | None:
@@ -112,26 +128,28 @@ def get_image_for_news(title: str, link: str) -> BytesIO:
     # 1. Из статьи
     img_url = extract_image_from_article(link)
     if img_url:
-        logger.info(f"✅ Картинка из статьи: {img_url[:80]}...")
         img = download_image_bytes(img_url)
         if img:
+            logger.info("✅ Картинка из статьи готова")
             return img
     
-    # 2. AI (с задержкой чтобы не получить 429)
+    # 2. AI с большим таймаутом
     try:
         prompt = urllib.parse.quote(f"game news {title[:60]}")
         ai_url = f"https://image.pollinations.ai/prompt/{prompt}?width=640&height=360&nologo=true"
-        logger.info(f"🤖 Пробую AI: {ai_url[:80]}...")
-        time.sleep(0.5)  # Задержка между запросами
-        img = download_image_bytes(ai_url)
-        if img:
+        logger.info(f"🤖 AI запрос...")
+        # Увеличиваем таймаут до 30 секунд
+        resp = requests.get(ai_url, timeout=30, headers=REQUEST_HEADERS)
+        if resp.status_code == 200 and len(resp.content) > 1000:
             logger.info("✅ AI-картинка готова")
-            return img
+            return BytesIO(resp.content)
+        else:
+            logger.warning(f"AI ответ: статус {resp.status_code}, размер {len(resp.content)}")
     except Exception as e:
-        logger.warning(f"AI не сработал: {e}")
+        logger.warning(f"AI ошибка: {e}")
     
     # 3. Заглушка
-    logger.info("📦 Использую заглушку")
+    logger.info("📦 Заглушка")
     return create_placeholder()
 
 def parse_entry(entry, cutoff_utc: datetime) -> dict | None:
@@ -171,7 +189,7 @@ def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) ->
         logger.warning(f"Ошибка {source_name}: {e}")
     return articles
 
-def fetch_category_news(category: str, limit=10) -> list:
+def fetch_category_news(category: str, limit=5) -> list:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=168)
     all_articles = []
     feeds = BRAWL_STARS_FEEDS if category == "brawlstars" else ROBLOX_FEEDS
@@ -228,7 +246,7 @@ def send_photo_bytes(chat_id: int, image_bytes: BytesIO, caption: str):
 
 def show_keyboard(chat_id: int):
     keyboard = {
-        "keyboard": [["🎮 Топ 10 новостей Brawl Stars", "🎮 Топ 10 новостей Roblox"]],
+        "keyboard": [["🎮 Топ 5 новостей Brawl Stars", "🎮 Топ 5 новостей Roblox"]],
         "resize_keyboard": True,
     }
     requests.post(
