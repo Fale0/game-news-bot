@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import feedparser
-from flask import Flask
+from flask import Flask, request  # ← ДОБАВИЛ request
 import threading
 
 from openai import OpenAI
@@ -47,14 +47,10 @@ REQUEST_HEADERS = {
 # ==================== ИСТОЧНИКИ ДЛЯ ИГР ====================
 BRAWL_STARS_FEEDS = [
     ("Brawl Stars Reddit", "https://www.reddit.com/r/Brawlstars/.rss"),
-    # Если есть новостной сайт, добавь его сюда, например:
-    # ("Game News Site", "https://example.com/rss/brawl-stars-news"),
 ]
 
 ROBLOX_FEEDS = [
     ("Roblox Reddit", "https://www.reddit.com/r/roblox/.rss"),
-    # Если есть новостной сайт, добавь его сюда, например:
-    # ("Game News Site", "https://example.com/rss/roblox-news"),
 ]
 
 # ============ Вспомогательные функции ============
@@ -78,7 +74,7 @@ def translate_text(text: str) -> str:
 def calculate_importance(title: str, description: str) -> int:
     text = (title + " " + description).lower()
     score = 5
-    high_kw = ["update", "new brawler", "new event", "leak", "official", "release", "launch", "update", "patch", "new game", "event"]
+    high_kw = ["update", "new brawler", "new event", "leak", "official", "release", "launch", "patch", "new game"]
     medium_kw = ["guide", "tips", "tricks", "gameplay", "review"]
     for w in high_kw:
         if w in text:
@@ -132,27 +128,21 @@ def extract_image_from_article(url: str) -> str | None:
 def get_ai_image(title: str, category: str) -> str | None:
     try:
         if category == "brawlstars":
-            prompt = f"Brawl Stars game art update {title[:60]}"
-        else: # roblox
-            prompt = f"Roblox game art update {title[:60]}"
+            prompt = f"Brawl Stars game art {title[:60]}"
+        else:
+            prompt = f"Roblox game art {title[:60]}"
         encoded = urllib.parse.quote(prompt)
         return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=768"
     except Exception:
         return None
 
 def get_fallback_image(category: str) -> str:
-    brawl_stars_images = [
+    images = [
         "https://cdn.pixabay.com/photo/2018/05/29/14/51/game-controller-3439543_640.jpg",
         "https://cdn.pixabay.com/photo/2017/04/29/12/56/gaming-2271516_640.jpg",
         "https://cdn.pixabay.com/photo/2016/10/27/14/53/game-1773966_640.jpg",
     ]
-    roblox_images = [
-        "https://cdn.pixabay.com/photo/2018/05/29/14/51/game-controller-3439543_640.jpg",
-        "https://cdn.pixabay.com/photo/2021/07/20/14/17/technology-6478523_640.jpg",
-        "https://cdn.pixabay.com/photo/2016/11/19/14/00/code-1839406_640.jpg",
-    ]
-    pool = brawl_stars_images if category == "brawlstars" else roblox_images
-    return random.choice(pool)
+    return random.choice(images)
 
 def is_url_accessible(url: str, timeout: int = 5) -> bool:
     try:
@@ -162,22 +152,16 @@ def is_url_accessible(url: str, timeout: int = 5) -> bool:
         return False
 
 def get_news_image(title: str, link: str, category: str) -> str:
-    # 1. Реальная картинка из статьи
     real_img = extract_image_from_article(link)
     if real_img and is_url_accessible(real_img):
-        logger.info(f"Использую реальное изображение из статьи")
         return real_img
-    # 2. AI-генерация
     ai_img = get_ai_image(title, category)
     if ai_img and is_url_accessible(ai_img):
-        logger.info(f"Использую AI-изображение")
         return ai_img
-    # 3. Fallback (сток)
-    logger.info("Использую стоковое изображение")
     return get_fallback_image(category)
 
 def parse_entry(entry, cutoff_utc: datetime, min_importance: int = 1) -> dict | None:
-    pub_struct = entry.get("published_parsed") or entry.get("updated_parsed") or entry.get("date_parsed")
+    pub_struct = entry.get("published_parsed") or entry.get("updated_parsed")
     if not pub_struct:
         return None
     try:
@@ -186,14 +170,12 @@ def parse_entry(entry, cutoff_utc: datetime, min_importance: int = 1) -> dict | 
         return None
     if pub_dt < cutoff_utc:
         return None
-
     title_en = entry.get("title", "Без заголовка")
     desc_en = clean_html(entry.get("description", "") or entry.get("summary", ""))[:500]
     link = entry.get("link", "#")
     importance = calculate_importance(title_en, desc_en)
     if importance < min_importance:
         return None
-
     return {
         "title_en": title_en,
         "desc_en": desc_en,
@@ -202,14 +184,14 @@ def parse_entry(entry, cutoff_utc: datetime, min_importance: int = 1) -> dict | 
         "importance": importance,
     }
 
-def fetch_source(source_name: str, url: str, cutoff: datetime, category: str, min_importance=1) -> list:
+def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) -> list:
     articles = []
     try:
         resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
         resp.raise_for_status()
         feed = feedparser.parse(resp.content)
-        for entry in feed.entries[:20]:  # Смотрим последние 20 записей из каждого источника
-            parsed = parse_entry(entry, cutoff, min_importance)
+        for entry in feed.entries[:20]:
+            parsed = parse_entry(entry, cutoff)
             if not parsed:
                 continue
             parsed["source"] = source_name
@@ -222,21 +204,19 @@ def fetch_source(source_name: str, url: str, cutoff: datetime, category: str, mi
     return articles
 
 def fetch_category_news(category: str, limit=10) -> list:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=168) # Новости за неделю
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=168)
     all_articles = []
     feeds = BRAWL_STARS_FEEDS if category == "brawlstars" else ROBLOX_FEEDS
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(fetch_source, name, url, cutoff, category) for name, url in feeds]
         for f in as_completed(futures):
             all_articles.extend(f.result())
-    # Удаление дубликатов по заголовку
     seen = set()
     unique = []
     for a in all_articles:
         if a["title_en"] not in seen:
             seen.add(a["title_en"])
             unique.append(a)
-    # Сортировка по важности и дате
     unique.sort(key=lambda x: (x["importance"], x["date_utc"]), reverse=True)
     return unique[:limit]
 
@@ -274,9 +254,11 @@ def send_message(chat_id: int, text: str, parse_mode: str = "HTML"):
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
-        requests.post(url, json=payload, timeout=15)
+        resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code != 200:
+            logger.error(f"sendMessage ошибка: {resp.text}")
     except Exception as e:
-        logger.error(f"Ошибка sendMessage: {e}")
+        logger.error(f"sendMessage исключение: {e}")
 
 def send_photo(chat_id: int, image_url: str, caption: str):
     try:
@@ -289,10 +271,10 @@ def send_photo(chat_id: int, image_url: str, caption: str):
         }
         resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code != 200:
-            logger.warning(f"Фото не отправлено, шлём текст")
+            logger.warning(f"Фото не отправлено: {resp.text}")
             send_message(chat_id, caption)
     except Exception as e:
-        logger.error(f"Ошибка sendPhoto: {e}")
+        logger.error(f"sendPhoto ошибка: {e}")
         send_message(chat_id, caption)
 
 def show_keyboard(chat_id: int):
@@ -302,6 +284,7 @@ def show_keyboard(chat_id: int):
         ],
         "resize_keyboard": True,
     }
+    send_message(chat_id, "<b>🎮 Выбери игру для новостей:</b>")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -315,7 +298,7 @@ def send_category_news(chat_id: int, category: str, category_display_name: str):
     send_message(chat_id, f"🔍 Загружаю последние новости для <b>{category_display_name}</b>... ⏳")
     articles = fetch_category_news(category)
     if not articles:
-        send_message(chat_id, f"😕 Новостей для {category_display_name} пока нет. Попробуйте позже.")
+        send_message(chat_id, f"😕 Новостей для {category_display_name} пока нет.")
         show_keyboard(chat_id)
         return
     for i, art in enumerate(articles, 1):
@@ -323,87 +306,29 @@ def send_category_news(chat_id: int, category: str, category_display_name: str):
         caption = build_caption(art, i)
         send_photo(chat_id, img_url, caption)
         time.sleep(0.5)
-    send_message(chat_id, f"✅ Показано <b>{len(articles)}</b> новостей для {category_display_name} с иллюстрациями.")
+    send_message(chat_id, f"✅ Показано <b>{len(articles)}</b> новостей.")
     show_keyboard(chat_id)
 
-# ==================== Polling ====================
-def bot_polling():
-    last_update_id = 0
-    logger.info("🎮 Игровой новостной бот запущен!")
-    while True:
-        try:
-            url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=30"
-            resp = requests.get(url, timeout=35)
-            updates = resp.json().get("result", [])
-            for upd in updates:
-                last_update_id = upd["update_id"]
-                msg = upd.get("message")
-                if not msg:
-                    continue
-                chat_id = msg["chat"]["id"]
-                text = msg.get("text", "")
-                if text == "/start":
-                    welcome = (
-                        "🎮 <b>Игровой новостной бот</b>\n\n"
-                        "📌 Узнавай последние новости о Brawl Stars и Roblox первым!\n"
-                        "📌 Оценка важности, перевод на русский\n"
-                        "📌 Картинки: сначала из статьи, потом AI, потом сток\n"
-                        "📌 Анализ DeepSeek 🧠 (если настроен)\n\n"
-                        "👇 <b>Выбери игру на клавиатуре ниже</b>"
-                    )
-                    send_message(chat_id, welcome)
-                    show_keyboard(chat_id)
-                elif text == "🎮 Топ 10 новостей Brawl Stars":
-                    threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
-                elif text == "🎮 Топ 10 новостей Roblox":
-                    threading.Thread(target=send_category_news, args=(chat_id, "roblox", "Roblox"), daemon=True).start()
-                elif text == "/health":
-                    send_message(chat_id, "✅ Бот работает")
-        except Exception as e:
-            logger.error(f"Polling error: {e}")
-            time.sleep(5)
-
-# ==================== Flask ====================
-@app.route("/")
-def index():
-    return "Gaming News Bot (Brawl Stars & Roblox)"
-
-@app.route("/health")
-def health():
-    return "OK", 200
-
-def keep_alive():
-    app_url = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:5000")
-    time.sleep(30)
-    while True:
-        try:
-            requests.get(app_url + "/health", timeout=10)
-            logger.info("Keep-alive ping")
-        except Exception:
-            pass
-        time.sleep(600)
-# ==================== Webhook ====================
+# ==================== Webhook (основной метод) ====================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    """Принимает обновления от Telegram через webhook"""
     try:
         update = request.get_json()
         if not update:
             return "OK", 200
-        
         msg = update.get("message")
         if not msg:
             return "OK", 200
-        
         chat_id = msg["chat"]["id"]
         text = msg.get("text", "")
+        logger.info(f"Получено сообщение: {text} от {chat_id}")
         
         if text == "/start":
             welcome = (
                 "🎮 <b>Игровой новостной бот</b>\n\n"
                 "📌 Узнавай последние новости о Brawl Stars и Roblox первым!\n"
                 "📌 Оценка важности, перевод на русский\n"
-                "📌 Картинки: сначала из статьи, потом AI, потом сток\n"
+                "📌 Картинки: из статьи, AI или сток\n"
                 "📌 Анализ DeepSeek 🧠 (если настроен)\n\n"
                 "👇 <b>Выбери игру на клавиатуре ниже</b>"
             )
@@ -415,41 +340,48 @@ def webhook():
             threading.Thread(target=send_category_news, args=(chat_id, "roblox", "Roblox"), daemon=True).start()
         elif text == "/health":
             send_message(chat_id, "✅ Бот работает")
-        
         return "OK", 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return "Error", 500
 
-# ==================== Запуск webhook вне блока if __name__ ====================
-# Это выполнится при импорте (gunicorn) и при прямом запуске (python)
+# ==================== Flask routes ====================
+@app.route("/")
+def index():
+    return "Gaming News Bot (Brawl Stars & Roblox)"
 
+@app.route("/health")
+def health():
+    return "OK", 200
+
+# ==================== Инициализация Webhook ====================
 def init_webhook():
-    """Инициализация webhook - вызывается и gunicorn и python"""
     try:
         app_url = os.environ.get("RENDER_EXTERNAL_URL", "")
         if not app_url:
-            logger.warning("RENDER_EXTERNAL_URL не найден")
+            logger.warning("❌ RENDER_EXTERNAL_URL не найден")
             return
         
         # Удаляем старый webhook
-        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
+        delete_resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
+        logger.info(f"Старый webhook удалён: {delete_resp.json()}")
         time.sleep(1)
         
         # Устанавливаем новый
         webhook_url = f"{app_url}/webhook"
-        resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
-        logger.info(f"✅ Webhook установлен: {resp.json()}")
+        set_resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
+        logger.info(f"✅ Webhook установлен: {set_resp.json()}")
+        
+        # Проверяем
+        info_resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo", timeout=10)
+        logger.info(f"Webhook info: {info_resp.json()}")
     except Exception as e:
         logger.error(f"Ошибка webhook: {e}")
 
-# Запускаем webhook сразу при загрузке модуля
+# Запускаем при загрузке модуля
 init_webhook()
 
-# Запускаем keep_alive в фоне
-threading.Thread(target=keep_alive, daemon=True).start()
-
-# Для прямого запуска python bot.py
+# Для прямого запуска (не используется с gunicorn)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
