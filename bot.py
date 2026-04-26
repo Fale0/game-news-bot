@@ -46,16 +46,17 @@ ROBLOX_FEEDS = [
 ]
 
 # ============ ИГРОВЫЕ КАРТИНКИ ДЛЯ ЗАГЛУШЕК ============
+# Используем прямые ссылки с Unsplash (всегда работают)
 BRAWL_STARS_IMAGES = [
-    "https://i.imgur.com/3qV4k6o.jpg",  # Бравл Старс тематика
-    "https://i.imgur.com/J8mXbwN.jpg",
-    "https://i.imgur.com/K9mN2xL.jpg",
+    "https://images.unsplash.com/photo-1511512578047-dfb367046420?w=640&h=360&fit=crop",  # Геймпад
+    "https://images.unsplash.com/photo-1493711662062-fa541adb3fc8?w=640&h=360&fit=crop",  # Контроллер
+    "https://images.unsplash.com/photo-1593305841991-05c297ba4575?w=640&h=360&fit=crop",  # Игровая консоль
 ]
 
 ROBLOX_IMAGES = [
-    "https://i.imgur.com/7h5P2mN.jpg",  # Роблокс тематика
-    "https://i.imgur.com/M3kL9pQ.jpg",
-    "https://i.imgur.com/W4nX8rT.jpg",
+    "https://images.unsplash.com/photo-1552820728-8b83bb6b2cf6?w=640&h=360&fit=crop",  # Гейминг
+    "https://images.unsplash.com/photo-1538481199705-c710c4e965fc?w=640&h=360&fit=crop",  # Клавиатура
+    "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=640&h=360&fit=crop",  # VR
 ]
 
 # ============ Функции очистки ============
@@ -128,7 +129,7 @@ def calculate_relevance(title: str, description: str, category: str) -> int:
 
 # ============ Работа с картинками ============
 def extract_image_from_article(url: str) -> str | None:
-    """Извлекает картинку из статьи"""
+    """Извлекает картинку из статьи (доработанная версия)"""
     try:
         resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
         resp.raise_for_status()
@@ -136,24 +137,30 @@ def extract_image_from_article(url: str) -> str | None:
         
         # og:image
         m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html, re.I)
-        if m and m.group(1).startswith("http"):
-            logger.info(f"✅ og:image: {m.group(1)[:80]}")
+        if m and m.group(1).startswith("http") and "pixel" not in m.group(1):
+            logger.info(f"✅ og:image")
             return m.group(1)
         
         # twitter:image
         m = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', html, re.I)
         if m and m.group(1).startswith("http"):
-            logger.info(f"✅ twitter:image: {m.group(1)[:80]}")
+            logger.info(f"✅ twitter:image")
             return m.group(1)
         
         # Reddit картинки
-        m = re.search(r'https?://(?:i\.redd\.it|preview\.redd\.it)/[^"\s]+', html, re.I)
+        m = re.search(r'https?://(?:i\.redd\.it|preview\.redd\.it|external-preview\.redd\.it)/[^"\s]+', html, re.I)
         if m:
-            logger.info(f"✅ Reddit картинка: {m.group(0)[:80]}")
+            logger.info(f"✅ Reddit media")
+            return m.group(0)
+        
+        # Google News картинки
+        m = re.search(r'https?://lh\d+\.googleusercontent\.com/[^"\s]+', html, re.I)
+        if m:
+            logger.info(f"✅ Google News image")
             return m.group(0)
             
     except Exception as e:
-        logger.warning(f"Поиск картинки: {e}")
+        pass
     return None
 
 def download_image_bytes(url: str) -> BytesIO | None:
@@ -168,16 +175,36 @@ def download_image_bytes(url: str) -> BytesIO | None:
     return None
 
 def get_fallback_image_bytes(category: str) -> BytesIO:
-    """Запасная игровая картинка"""
+    """Запасная игровая картинка с Unsplash"""
     images = BRAWL_STARS_IMAGES if category == "brawlstars" else ROBLOX_IMAGES
+    # Перемешиваем чтобы не всегда одна и та же
+    random.shuffle(images)
     for url in images:
         img = download_image_bytes(url)
         if img:
-            logger.info(f"📦 Игровая заглушка")
+            logger.info(f"📦 Заглушка с Unsplash")
             return img
-    # Если не скачалось — создаём цветную заглушку
-    color = (76, 175, 80) if category == "brawlstars" else (33, 150, 243)
-    img = Image.new('RGB', (640, 360), color=color)
+    
+    # Если совсем ничего не загрузилось — простой градиент
+    logger.info("📦 Заглушка Pillow")
+    img = Image.new('RGB', (640, 360), color=(30, 30, 40))
+    # Добавляем текст
+    from PIL import ImageDraw, ImageFont
+    draw = ImageDraw.Draw(img)
+    text = "Brawl Stars" if category == "brawlstars" else "Roblox"
+    # Используем крупный шрифт (базовый)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+    except:
+        font = ImageFont.load_default()
+    # Центрируем текст
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_width = bbox[2] - bbox[0]
+    text_height = bbox[3] - bbox[1]
+    x = (640 - text_width) / 2
+    y = (360 - text_height) / 2
+    draw.text((x, y), text, fill=(255, 255, 255), font=font)
+    
     bio = BytesIO()
     img.save(bio, 'JPEG', quality=85)
     bio.seek(0)
@@ -193,19 +220,26 @@ def get_image_for_news(title: str, link: str, category: str) -> BytesIO:
             logger.info("✅ Картинка из статьи")
             return img
     
-    # 2. AI-генерация
-    try:
-        prompt = urllib.parse.quote(f"{'Brawl Stars' if category == 'brawlstars' else 'Roblox'} game news {title[:60]}")
-        ai_url = f"https://image.pollinations.ai/prompt/{prompt}?width=640&height=360&nologo=true"
-        logger.info(f"🤖 AI запрос...")
-        resp = requests.get(ai_url, timeout=30, headers=REQUEST_HEADERS)
-        if resp.status_code == 200 and len(resp.content) > 1000:
-            logger.info("✅ AI-картинка")
-            return BytesIO(resp.content)
-    except Exception as e:
-        logger.warning(f"AI ошибка: {e}")
+    # 2. AI-генерация (3 попытки)
+    for attempt in range(3):
+        try:
+            game_name = "Brawl Stars" if category == "brawlstars" else "Roblox"
+            # Используем короткий промпт для быстрой генерации
+            ai_prompt = urllib.parse.quote(f"{game_name} game screenshot update news")
+            ai_url = f"https://image.pollinations.ai/prompt/{ai_prompt}?width=640&height=360&nologo=true&seed={random.randint(1,1000)}"
+            logger.info(f"🤖 AI попытка {attempt+1}")
+            resp = requests.get(ai_url, timeout=45, headers=REQUEST_HEADERS)
+            if resp.status_code == 200 and len(resp.content) > 5000:
+                logger.info(f"✅ AI-картинка (попытка {attempt+1})")
+                return BytesIO(resp.content)
+            else:
+                logger.warning(f"AI попытка {attempt+1}: статус {resp.status_code}, размер {len(resp.content)}")
+        except Exception as e:
+            logger.warning(f"AI попытка {attempt+1}: {e}")
+            time.sleep(2)  # Пауза между попытками
     
-    # 3. Игровая заглушка
+    # 3. Игровая заглушка с Unsplash
+    logger.info("📦 Игровая заглушка (Unsplash)")
     return get_fallback_image_bytes(category)
 
 # ============ Парсинг новостей ============
