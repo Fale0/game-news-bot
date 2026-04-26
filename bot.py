@@ -6,14 +6,13 @@ import logging
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
 
 import requests
 import feedparser
-from flask import Flask, request  # ← request нужен для webhook
+from flask import Flask, request
 import threading
 
-# Дипсик отключён (закомментирован)
-# from openai import OpenAI
 from deep_translator import GoogleTranslator
 
 logging.basicConfig(
@@ -25,18 +24,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")  # отключено
 MOSCOW_TZ = timezone(timedelta(hours=3))
-
-# deepseek_client = None  # отключено
-# if DEEPSEEK_API_KEY:
-#     deepseek_client = OpenAI(
-#         api_key=DEEPSEEK_API_KEY,
-#         base_url="https://api.deepseek.com/v1",
-#     )
-#     logger.info("✅ DeepSeek API подключён")
-# else:
-#     logger.warning("⚠️ DeepSeek API ключ не найден")
 
 translator = GoogleTranslator(source="en", target="ru")
 
@@ -45,7 +33,7 @@ REQUEST_HEADERS = {
     "Accept": "application/rss+xml, application/xml, text/xml, */*",
 }
 
-# ==================== ИСТОЧНИКИ ДЛЯ ИГР ====================
+# ==================== ИСТОЧНИКИ ====================
 BRAWL_STARS_FEEDS = [
     ("Brawl Stars Reddit", "https://www.reddit.com/r/Brawlstars/.rss"),
 ]
@@ -54,7 +42,7 @@ ROBLOX_FEEDS = [
     ("Roblox Reddit", "https://www.reddit.com/r/roblox/.rss"),
 ]
 
-# ============ Вспомогательные функции ============
+# ============ Функции ============
 def clean_html(raw: str) -> str:
     if not raw:
         return ""
@@ -85,71 +73,86 @@ def calculate_importance(title: str, description: str) -> int:
             score += 1
     return min(10, max(1, score))
 
-# ===== Функции для картинок =====
 def extract_image_from_article(url: str) -> str | None:
-    """1. Пробуем взять картинку из статьи (og:image)"""
+    """1. Пробуем взять картинку из статьи"""
     try:
         resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
         resp.raise_for_status()
-        patterns = [
-            r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"',
-            r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"',
-            r'<meta[^>]*itemprop="image"[^>]*content="([^"]+)"',
-        ]
-        for pat in patterns:
-            match = re.search(pat, resp.text, re.IGNORECASE)
-            if match:
-                img = match.group(1)
-                if img.startswith("http") and "pixel" not in img.lower():
-                    logger.info(f"✅ Нашёл картинку в статье: {img[:80]}...")
-                    return img
+        # Ищем og:image
+        og_match = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', resp.text, re.IGNORECASE)
+        if og_match:
+            img = og_match.group(1)
+            if img.startswith("http"):
+                logger.info(f"✅ Нашёл картинку в статье: {img[:80]}...")
+                return img
+        # Ищем twitter:image
+        tw_match = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', resp.text, re.IGNORECASE)
+        if tw_match:
+            img = tw_match.group(1)
+            if img.startswith("http"):
+                logger.info(f"✅ Нашёл twitter:image: {img[:80]}...")
+                return img
     except Exception as e:
         logger.warning(f"Не смог достать картинку из статьи: {e}")
     return None
 
-def get_ai_image(title: str, category: str) -> str | None:
-    """2. Пробуем сгенерировать AI-картинку"""
+def download_image(url: str) -> BytesIO | None:
+    """Скачивает картинку и возвращает как BytesIO"""
     try:
-        if category == "brawlstars":
-            prompt = f"Brawl Stars game mobile art {title[:60]}"
-        else:
-            prompt = f"Roblox game art {title[:60]}"
-        encoded = urllib.parse.quote(prompt)
-        ai_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=768"
-        logger.info(f"🤖 Пробую AI-картинку: {ai_url[:80]}...")
-        # Проверяем доступность
-        check = requests.head(ai_url, timeout=5)
-        if check.status_code == 200:
-            return ai_url
+        resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
+        resp.raise_for_status()
+        return BytesIO(resp.content)
     except Exception as e:
-        logger.warning(f"AI-картинка не получилась: {e}")
-    return None
+        logger.warning(f"Не смог скачать картинку {url[:60]}: {e}")
+        return None
 
-def get_fallback_image(category: str) -> str:
-    """3. Запасная картинка"""
-    images = [
+def get_fallback_image_bytes() -> BytesIO:
+    """Создаёт простую заглушку"""
+    # Скачиваем надёжную картинку с Pixabay
+    fallback_urls = [
         "https://cdn.pixabay.com/photo/2018/05/29/14/51/game-controller-3439543_640.jpg",
         "https://cdn.pixabay.com/photo/2017/04/29/12/56/gaming-2271516_640.jpg",
         "https://cdn.pixabay.com/photo/2016/10/27/14/53/game-1773966_640.jpg",
     ]
-    chosen = random.choice(images)
-    logger.info(f"📦 Использую запасную картинку: {chosen}")
-    return chosen
+    for url in fallback_urls:
+        img = download_image(url)
+        if img:
+            return img
+    # Если вообще ничего не скачалось — создаём пустую картинку
+    from PIL import Image
+    img = Image.new('RGB', (640, 360), color=(30, 30, 40))
+    bio = BytesIO()
+    img.save(bio, 'JPEG')
+    bio.seek(0)
+    return bio
 
-def get_news_image(title: str, link: str, category: str) -> str:
-    """Получить картинку: 1) из статьи → 2) AI → 3) запасная"""
+def get_news_image_bytes(title: str, link: str) -> BytesIO:
+    """Получить картинку как BytesIO"""
     # 1. Из статьи
-    img = extract_image_from_article(link)
-    if img:
-        return img
-    # 2. AI-генерация
-    img = get_ai_image(title, category)
-    if img:
-        return img
+    img_url = extract_image_from_article(link)
+    if img_url:
+        img_bytes = download_image(img_url)
+        if img_bytes:
+            logger.info("✅ Отправляю картинку из статьи")
+            return img_bytes
+    
+    # 2. Пробуем AI
+    try:
+        prompt = urllib.parse.quote(f"game news {title[:60]}")
+        ai_url = f"https://image.pollinations.ai/prompt/{prompt}?width=640&height=360"
+        logger.info(f"🤖 Пробую AI: {ai_url[:80]}...")
+        img_bytes = download_image(ai_url)
+        if img_bytes:
+            logger.info("✅ Отправляю AI-картинку")
+            return img_bytes
+    except Exception as e:
+        logger.warning(f"AI не получился: {e}")
+    
     # 3. Запасная
-    return get_fallback_image(category)
+    logger.info("📦 Использую запасную картинку")
+    return get_fallback_image_bytes()
 
-def parse_entry(entry, cutoff_utc: datetime, min_importance: int = 1) -> dict | None:
+def parse_entry(entry, cutoff_utc: datetime) -> dict | None:
     pub_struct = entry.get("published_parsed") or entry.get("updated_parsed")
     if not pub_struct:
         return None
@@ -163,8 +166,6 @@ def parse_entry(entry, cutoff_utc: datetime, min_importance: int = 1) -> dict | 
     desc_en = clean_html(entry.get("description", "") or entry.get("summary", ""))[:500]
     link = entry.get("link", "#")
     importance = calculate_importance(title_en, desc_en)
-    if importance < min_importance:
-        return None
     return {
         "title_en": title_en,
         "desc_en": desc_en,
@@ -211,7 +212,7 @@ def fetch_category_news(category: str, limit=10) -> list:
 
 def build_caption(article: dict, idx: int) -> str:
     title_ru = escape_html(translate_text(article["title_en"]))
-    desc_ru = escape_html(translate_text(article["desc_en"]))[:350]
+    desc_ru = escape_html(translate_text(article["desc_en"]))[:200]
     imp = article["importance"]
     if imp >= 8:
         emoji = "🔴🔥"
@@ -229,9 +230,6 @@ def build_caption(article: dict, idx: int) -> str:
         f"⭐ Важность: {imp}/10\n\n"
         f"🔗 <a href='{article['link']}'>Читать полностью</a>"
     )
-    # Дипсик отключён
-    # if deepseek_client:
-    #     caption += analyze_with_deepseek(title_ru, desc_ru)
     return caption
 
 # ==================== Telegram API ====================
@@ -244,30 +242,26 @@ def send_message(chat_id: int, text: str, parse_mode: str = "HTML"):
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
-        resp = requests.post(url, json=payload, timeout=15)
-        if resp.status_code != 200:
-            logger.error(f"sendMessage ошибка: {resp.text}")
+        requests.post(url, json=payload, timeout=15)
     except Exception as e:
-        logger.error(f"sendMessage исключение: {e}")
+        logger.error(f"sendMessage: {e}")
 
-def send_photo(chat_id: int, image_url: str, caption: str):
-    """Отправляет фото. Если не получается — шлёт текст с картинкой как ссылкой"""
+def send_photo_bytes(chat_id: int, image_bytes: BytesIO, caption: str):
+    """Отправляет фото как файл (multipart/form-data)"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-        payload = {
+        files = {"photo": ("image.jpg", image_bytes, "image/jpeg")}
+        data = {
             "chat_id": chat_id,
-            "photo": image_url,
-            "caption": caption[:1024],  # Telegram обрезает длинные подписи
+            "caption": caption[:1024],
             "parse_mode": "HTML",
         }
-        resp = requests.post(url, json=payload, timeout=20)
+        resp = requests.post(url, files=files, data=data, timeout=20)
         if resp.status_code != 200:
             logger.warning(f"Фото не отправлено: {resp.text}")
-            # Отправляем как текст + картинка ссылкой
-            fallback_text = caption[:1000] + f"\n\n🖼 <a href='{image_url}'>Картинка</a>"
-            send_message(chat_id, fallback_text)
+            send_message(chat_id, caption[:1000])
     except Exception as e:
-        logger.error(f"sendPhoto ошибка: {e}")
+        logger.error(f"sendPhoto: {e}")
         send_message(chat_id, caption[:1000])
 
 def show_keyboard(chat_id: int):
@@ -294,10 +288,10 @@ def send_category_news(chat_id: int, category: str, category_display_name: str):
         show_keyboard(chat_id)
         return
     for i, art in enumerate(articles, 1):
-        img_url = get_news_image(art["title_en"], art["link"], category)
+        img_bytes = get_news_image_bytes(art["title_en"], art["link"])
         caption = build_caption(art, i)
-        send_photo(chat_id, img_url, caption)
-        time.sleep(0.5)
+        send_photo_bytes(chat_id, img_bytes, caption)
+        time.sleep(0.3)
     send_message(chat_id, f"✅ Показано <b>{len(articles)}</b> новостей.")
     show_keyboard(chat_id)
 
@@ -318,10 +312,9 @@ def webhook():
         if text == "/start":
             welcome = (
                 "🎮 <b>Игровой новостной бот</b>\n\n"
-                "📌 Узнавай последние новости о Brawl Stars и Roblox первым!\n"
-                "📌 Оценка важности, перевод на русский\n"
-                "📌 Картинки: из статьи, AI или сток\n"
-                "👇 <b>Выбери игру на клавиатуре ниже</b>"
+                "📌 Brawl Stars и Roblox\n"
+                "📌 Картинки из новостей\n"
+                "👇 Выбери игру"
             )
             send_message(chat_id, welcome)
             show_keyboard(chat_id)
@@ -329,46 +322,32 @@ def webhook():
             threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
         elif text == "🎮 Топ 10 новостей Roblox":
             threading.Thread(target=send_category_news, args=(chat_id, "roblox", "Roblox"), daemon=True).start()
-        elif text == "/health":
-            send_message(chat_id, "✅ Бот работает")
         return "OK", 200
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return "Error", 500
 
-# ==================== Flask routes ====================
 @app.route("/")
 def index():
-    return "Gaming News Bot (Brawl Stars & Roblox)"
+    return "OK"
 
 @app.route("/health")
 def health():
     return "OK", 200
 
-# ==================== Инициализация Webhook ====================
 def init_webhook():
     try:
         app_url = os.environ.get("RENDER_EXTERNAL_URL", "")
         if not app_url:
-            logger.warning("❌ RENDER_EXTERNAL_URL не найден")
             return
-        
-        # Удаляем старый webhook
         requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
         time.sleep(1)
-        
-        # Устанавливаем новый
         webhook_url = f"{app_url}/webhook"
-        resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
-        logger.info(f"✅ Webhook установлен: {resp.json()}")
-        
-        # Проверяем
-        info_resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo", timeout=10)
-        logger.info(f"Webhook info: {info_resp.json()}")
+        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
+        logger.info(f"Webhook: {r.json()}")
     except Exception as e:
-        logger.error(f"Ошибка webhook: {e}")
+        logger.error(f"Webhook error: {e}")
 
-# Запускаем webhook при загрузке модуля
 init_webhook()
 
 if __name__ == "__main__":
