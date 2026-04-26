@@ -12,7 +12,7 @@ import requests
 import feedparser
 from flask import Flask, request
 import threading
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from deep_translator import GoogleTranslator
 
@@ -34,7 +34,6 @@ REQUEST_HEADERS = {
 }
 
 # ==================== ИСТОЧНИКИ НОВОСТЕЙ ====================
-# Реальные новостные сайты + Reddit как дополнение
 BRAWL_STARS_FEEDS = [
     ("Brawl Stars News", "https://news.google.com/rss/search?q=Brawl+Stars+update+new+brawler&hl=en&gl=US&ceid=US:en"),
     ("Brawl Stars Reddit", "https://www.reddit.com/r/Brawlstars/.rss"),
@@ -45,35 +44,17 @@ ROBLOX_FEEDS = [
     ("Roblox Reddit", "https://www.reddit.com/r/roblox/.rss"),
 ]
 
-# ============ ИГРОВЫЕ КАРТИНКИ ДЛЯ ЗАГЛУШЕК ============
-# Используем прямые ссылки с Unsplash (всегда работают)
-BRAWL_STARS_IMAGES = [
-    "https://images.unsplash.com/photo-1511512578047-dfb367046420?w=640&h=360&fit=crop",  # Геймпад
-    "https://images.unsplash.com/photo-1493711662062-fa541adb3fc8?w=640&h=360&fit=crop",  # Контроллер
-    "https://images.unsplash.com/photo-1593305841991-05c297ba4575?w=640&h=360&fit=crop",  # Игровая консоль
-]
-
-ROBLOX_IMAGES = [
-    "https://images.unsplash.com/photo-1552820728-8b83bb6b2cf6?w=640&h=360&fit=crop",  # Гейминг
-    "https://images.unsplash.com/photo-1538481199705-c710c4e965fc?w=640&h=360&fit=crop",  # Клавиатура
-    "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=640&h=360&fit=crop",  # VR
-]
-
 # ============ Функции очистки ============
 def clean_description(desc: str) -> str:
-    """Очищает описание от Reddit-мусора и HTML"""
     if not desc:
         return ""
-    # Удаляем HTML теги
     desc = re.sub(r"<.*?>", "", desc)
-    # Удаляем "&#32;представлено /u/... [ссылка] [комментарии]"
     desc = re.sub(r"&#32;.*?\[comments\]", "", desc)
     desc = re.sub(r"submitted by\s+/u/\S+", "", desc)
     desc = re.sub(r"\[link\]|\[comments\]", "", desc)
     desc = re.sub(r"&#32;", " ", desc)
-    # Удаляем множественные пробелы
     desc = re.sub(r"\s+", " ", desc).strip()
-    return desc[:300]  # Ограничиваем длину
+    return desc[:300]
 
 def escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "<").replace(">", ">")
@@ -89,158 +70,156 @@ def translate_text(text: str) -> str:
 
 # ============ Система релевантности ============
 def calculate_relevance(title: str, description: str, category: str) -> int:
-    """Оценивает новость по релевантности (0-100)"""
     text = (title + " " + description).lower()
-    score = 30  # Базовый балл
+    score = 30
     
     if category == "brawlstars":
-        # Ключевые слова Brawl Stars
         keywords = {
             "new brawler": 25, "update": 20, "balance": 15, "skin": 10,
             "buff": 15, "nerf": 15, "brawl pass": 20, "season": 15,
             "chromatic": 10, "power league": 15, "esports": 15,
             "championship": 20, "supercell": 25, "release": 20,
         }
-    else:  # roblox
+    else:
         keywords = {
             "new game": 25, "update": 20, "event": 20, "roblox studio": 15,
-            " scripting": 10, "building": 15, "avatar": 10,
+            "scripting": 10, "building": 15, "avatar": 10,
             "robux": 15, "premium": 15, "release": 20, "launch": 20,
-            "rp": 15, "roleplay": 10, "obby": 10, "tycoon": 10,
         }
     
     for word, points in keywords.items():
         if word in text:
             score += points
     
-    # Штраф за нерелевантный контент
     bad_words = ["meme", "fanart", "fan art", "irl", "my girlfriend", "look at this"]
     for word in bad_words:
         if word in text:
             score -= 20
     
-    # Бонус за свежесть упоминаний
-    fresh_words = ["breaking", "just announced", "new update", "just released"]
-    for word in fresh_words:
-        if word in text:
-            score += 15
-    
     return max(0, min(100, score))
 
-# ============ Работа с картинками ============
-def extract_image_from_article(url: str) -> str | None:
-    """Извлекает картинку из статьи (доработанная версия)"""
+# ============ НОВАЯ СИСТЕМА КАРТИНОК ============
+# Используем несколько бесплатных API для генерации картинок
+def generate_image_pollinations(prompt: str) -> BytesIO | None:
+    """Попытка через Pollinations.ai"""
     try:
-        resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
-        resp.raise_for_status()
-        html = resp.text
-        
-        # og:image
-        m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html, re.I)
-        if m and m.group(1).startswith("http") and "pixel" not in m.group(1):
-            logger.info(f"✅ og:image")
-            return m.group(1)
-        
-        # twitter:image
-        m = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', html, re.I)
-        if m and m.group(1).startswith("http"):
-            logger.info(f"✅ twitter:image")
-            return m.group(1)
-        
-        # Reddit картинки
-        m = re.search(r'https?://(?:i\.redd\.it|preview\.redd\.it|external-preview\.redd\.it)/[^"\s]+', html, re.I)
-        if m:
-            logger.info(f"✅ Reddit media")
-            return m.group(0)
-        
-        # Google News картинки
-        m = re.search(r'https?://lh\d+\.googleusercontent\.com/[^"\s]+', html, re.I)
-        if m:
-            logger.info(f"✅ Google News image")
-            return m.group(0)
-            
-    except Exception as e:
-        pass
-    return None
-
-def download_image_bytes(url: str) -> BytesIO | None:
-    """Скачивает картинку"""
-    try:
-        resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
-        resp.raise_for_status()
-        if len(resp.content) > 500:  # Проверяем что это реальная картинка
+        encoded = urllib.parse.quote(prompt[:100])
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=640&height=360&nologo=true&seed={random.randint(1,9999)}"
+        resp = requests.get(url, timeout=30, headers=REQUEST_HEADERS)
+        if resp.status_code == 200 and len(resp.content) > 5000:
+            logger.info("✅ Pollinations.ai сработал")
             return BytesIO(resp.content)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Pollinations: {e}")
     return None
 
-def get_fallback_image_bytes(category: str) -> BytesIO:
-    """Запасная игровая картинка с Unsplash"""
-    images = BRAWL_STARS_IMAGES if category == "brawlstars" else ROBLOX_IMAGES
-    # Перемешиваем чтобы не всегда одна и та же
-    random.shuffle(images)
-    for url in images:
-        img = download_image_bytes(url)
-        if img:
-            logger.info(f"📦 Заглушка с Unsplash")
-            return img
-    
-    # Если совсем ничего не загрузилось — простой градиент
-    logger.info("📦 Заглушка Pillow")
-    img = Image.new('RGB', (640, 360), color=(30, 30, 40))
-    # Добавляем текст
-    from PIL import ImageDraw, ImageFont
-    draw = ImageDraw.Draw(img)
-    text = "Brawl Stars" if category == "brawlstars" else "Roblox"
-    # Используем крупный шрифт (базовый)
+def generate_image_picsum() -> BytesIO:
+    """Картинка с Lorem Picsum (всегда работает)"""
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 40)
+        # Случайный ID чтобы картинки не повторялись
+        img_id = random.randint(1, 1000)
+        url = f"https://picsum.photos/640/360?random={img_id}"
+        resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
+        if resp.status_code == 200:
+            logger.info(f"✅ Picsum картинка (id={img_id})")
+            return BytesIO(resp.content)
+    except Exception as e:
+        logger.warning(f"Picsum: {e}")
+    return None
+
+def generate_image_via_placeholder(category: str, title: str = "") -> BytesIO:
+    """Создаёт красивую заглушку с градиентом и текстом"""
+    # Цвета для каждой игры
+    if category == "brawlstars":
+        color1, color2 = (255, 200, 0), (255, 100, 0)  # Золотой/оранжевый
+        game_name = "BRAWL STARS"
+    else:
+        color1, color2 = (0, 150, 255), (0, 50, 200)  # Синий градиент
+        game_name = "ROBLOX"
+    
+    img = Image.new('RGB', (640, 360))
+    draw = ImageDraw.Draw(img)
+    
+    # Градиент
+    for y in range(360):
+        r = int(color1[0] + (color2[0] - color1[0]) * y / 360)
+        g = int(color1[1] + (color2[1] - color1[1]) * y / 360)
+        b = int(color1[2] + (color2[2] - color1[2]) * y / 360)
+        draw.line([(0, y), (640, y)], fill=(r, g, b))
+    
+    # Текст
+    try:
+        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 50)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
     except:
-        font = ImageFont.load_default()
-    # Центрируем текст
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
-    x = (640 - text_width) / 2
-    y = (360 - text_height) / 2
-    draw.text((x, y), text, fill=(255, 255, 255), font=font)
+        font_large = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+    
+    # Название игры
+    bbox = draw.textbbox((0, 0), game_name, font=font_large)
+    w = bbox[2] - bbox[0]
+    draw.text((320 - w/2, 120), game_name, fill=(255, 255, 255), font=font_large)
+    
+    # Заголовок новости (обрезанный)
+    if title:
+        title_short = title[:50] + "..." if len(title) > 50 else title
+        bbox = draw.textbbox((0, 0), title_short, font=font_small)
+        w = bbox[2] - bbox[0]
+        draw.text((320 - w/2, 200), title_short, fill=(255, 255, 255, 200), font=font_small)
     
     bio = BytesIO()
-    img.save(bio, 'JPEG', quality=85)
+    img.save(bio, 'JPEG', quality=90)
     bio.seek(0)
+    logger.info(f"✅ Заглушка с градиентом ({game_name})")
     return bio
 
 def get_image_for_news(title: str, link: str, category: str) -> BytesIO:
-    """Получает картинку: статья → AI → игровая заглушка"""
+    """
+    Приоритет:
+    1. Картинка из статьи (og:image)
+    2. AI-генерация (Pollinations.ai) — ОДНА попытка
+    3. Lorem Picsum (случайная красивая картинка)
+    4. Цветная заглушка с текстом
+    """
     # 1. Из статьи
-    img_url = extract_image_from_article(link)
-    if img_url:
-        img = download_image_bytes(img_url)
-        if img:
-            logger.info("✅ Картинка из статьи")
-            return img
+    try:
+        resp = requests.get(link, timeout=8, headers=REQUEST_HEADERS)
+        html = resp.text
+        
+        # Ищем og:image
+        m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html, re.I)
+        if not m:
+            m = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', html, re.I)
+        if not m:
+            m = re.search(r'https?://(?:i\.redd\.it|preview\.redd\.it)/[^"\s]+', html, re.I)
+        if not m:
+            m = re.search(r'https?://lh\d+\.googleusercontent\.com/[^"\s]+', html, re.I)
+        
+        if m:
+            img_url = m.group(1) if m.lastindex is None else m.group(0)
+            if img_url.startswith("http"):
+                try:
+                    img_resp = requests.get(img_url, timeout=10, headers=REQUEST_HEADERS)
+                    if img_resp.status_code == 200 and len(img_resp.content) > 500:
+                        logger.info("✅ Картинка из статьи")
+                        return BytesIO(img_resp.content)
+                except:
+                    pass
+    except:
+        pass
     
-    # 2. AI-генерация (3 попытки)
-    for attempt in range(3):
-        try:
-            game_name = "Brawl Stars" if category == "brawlstars" else "Roblox"
-            # Используем короткий промпт для быстрой генерации
-            ai_prompt = urllib.parse.quote(f"{game_name} game screenshot update news")
-            ai_url = f"https://image.pollinations.ai/prompt/{ai_prompt}?width=640&height=360&nologo=true&seed={random.randint(1,1000)}"
-            logger.info(f"🤖 AI попытка {attempt+1}")
-            resp = requests.get(ai_url, timeout=45, headers=REQUEST_HEADERS)
-            if resp.status_code == 200 and len(resp.content) > 5000:
-                logger.info(f"✅ AI-картинка (попытка {attempt+1})")
-                return BytesIO(resp.content)
-            else:
-                logger.warning(f"AI попытка {attempt+1}: статус {resp.status_code}, размер {len(resp.content)}")
-        except Exception as e:
-            logger.warning(f"AI попытка {attempt+1}: {e}")
-            time.sleep(2)  # Пауза между попытками
+    # 2. AI (одна быстрая попытка)
+    ai_img = generate_image_pollinations(f"{'Brawl Stars' if category == 'brawlstars' else 'Roblox'} game screenshot")
+    if ai_img:
+        return ai_img
     
-    # 3. Игровая заглушка с Unsplash
-    logger.info("📦 Игровая заглушка (Unsplash)")
-    return get_fallback_image_bytes(category)
+    # 3. Lorem Picsum (случайные красивые фото)
+    picsum_img = generate_image_picsum()
+    if picsum_img:
+        return picsum_img
+    
+    # 4. Заглушка с градиентом
+    return generate_image_via_placeholder(category, title)
 
 # ============ Парсинг новостей ============
 def parse_entry(entry, cutoff_utc: datetime, category: str) -> dict | None:
@@ -263,7 +242,6 @@ def parse_entry(entry, cutoff_utc: datetime, category: str) -> dict | None:
     link = entry.get("link", "#")
     relevance = calculate_relevance(title_en, desc_en, category)
     
-    # Пропускаем совсем нерелевантные
     if relevance < 30:
         return None
     
@@ -295,7 +273,6 @@ def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) ->
     return articles
 
 def fetch_category_news(category: str, limit=7) -> list:
-    """Собирает топ-7 самых релевантных новостей"""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=168)
     all_articles = []
     feeds = BRAWL_STARS_FEEDS if category == "brawlstars" else ROBLOX_FEEDS
@@ -305,7 +282,6 @@ def fetch_category_news(category: str, limit=7) -> list:
         for f in as_completed(futures):
             all_articles.extend(f.result())
     
-    # Удаление дубликатов
     seen = set()
     unique = []
     for a in all_articles:
@@ -314,7 +290,6 @@ def fetch_category_news(category: str, limit=7) -> list:
             seen.add(key)
             unique.append(a)
     
-    # Сортировка по релевантности И свежести
     unique.sort(key=lambda x: (x["relevance"], x["date_utc"]), reverse=True)
     
     logger.info(f"🎯 {category}: отобрано {len(unique[:limit])} из {len(unique)}")
@@ -346,7 +321,6 @@ def send_message(chat_id: int, text: str):
         logger.error(f"sendMessage: {e}")
 
 def send_photo_bytes(chat_id: int, image_bytes: BytesIO, caption: str):
-    """Отправляет фото как файл"""
     try:
         files = {"photo": ("image.jpg", image_bytes, "image/jpeg")}
         data = {"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"}
@@ -399,7 +373,7 @@ def webhook():
         logger.info(f"📩 {text} от {chat_id}")
         
         if text == "/start":
-            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n📊 Топ-7 релевантных новостей\n🖼 Картинки из статей или AI\n👇 Выбери игру:")
+            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n📊 Топ-7 релевантных новостей\n🖼 Картинки из статей/AI/Picsum\n👇 Выбери игру:")
             show_keyboard(chat_id)
         elif text == "🎮 Топ 7 новостей Brawl Stars":
             threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
