@@ -382,9 +382,65 @@ def keep_alive():
         except Exception:
             pass
         time.sleep(600)
+# ==================== Webhook ====================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    """Принимает обновления от Telegram через webhook"""
+    try:
+        update = request.get_json()
+        if not update:
+            return "OK", 200
+        
+        msg = update.get("message")
+        if not msg:
+            return "OK", 200
+        
+        chat_id = msg["chat"]["id"]
+        text = msg.get("text", "")
+        
+        if text == "/start":
+            welcome = (
+                "🎮 <b>Игровой новостной бот</b>\n\n"
+                "📌 Узнавай последние новости о Brawl Stars и Roblox первым!\n"
+                "📌 Оценка важности, перевод на русский\n"
+                "📌 Картинки: сначала из статьи, потом AI, потом сток\n"
+                "📌 Анализ DeepSeek 🧠 (если настроен)\n\n"
+                "👇 <b>Выбери игру на клавиатуре ниже</b>"
+            )
+            send_message(chat_id, welcome)
+            show_keyboard(chat_id)
+        elif text == "🎮 Топ 10 новостей Brawl Stars":
+            threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
+        elif text == "🎮 Топ 10 новостей Roblox":
+            threading.Thread(target=send_category_news, args=(chat_id, "roblox", "Roblox"), daemon=True).start()
+        elif text == "/health":
+            send_message(chat_id, "✅ Бот работает")
+        
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return "Error", 500
 
+def set_webhook():
+    """Устанавливает webhook при запуске"""
+    try:
+        app_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+        if not app_url:
+            logger.warning("RENDER_EXTERNAL_URL не найден, пропускаю webhook")
+            return
+        
+        webhook_url = f"{app_url}/webhook"
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}"
+        resp = requests.get(url, timeout=10)
+        logger.info(f"Webhook установлен: {resp.json()}")
+    except Exception as e:
+        logger.error(f"Ошибка установки webhook: {e}")
 if __name__ == "__main__":
+    # Запускаем webhook
+    set_webhook()
+    # Запускаем keep_alive в фоне
     threading.Thread(target=keep_alive, daemon=True).start()
-    threading.Thread(target=bot_polling, daemon=True).start()
+    
+    # Flask должен быть в основном потоке для gunicorn
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port) 
+    app.run(host="0.0.0.0", port=port)
