@@ -12,6 +12,7 @@ import requests
 import feedparser
 from flask import Flask, request
 import threading
+from PIL import Image
 
 from deep_translator import GoogleTranslator
 
@@ -30,7 +31,6 @@ translator = GoogleTranslator(source="en", target="ru")
 
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/rss+xml, application/xml, text/xml, */*",
 }
 
 # ==================== ИСТОЧНИКИ ====================
@@ -64,93 +64,75 @@ def calculate_importance(title: str, description: str) -> int:
     text = (title + " " + description).lower()
     score = 5
     high_kw = ["update", "new brawler", "new event", "leak", "official", "release", "launch", "patch", "new game"]
-    medium_kw = ["guide", "tips", "tricks", "gameplay", "review"]
     for w in high_kw:
         if w in text:
             score += 2
-    for w in medium_kw:
-        if w in text:
-            score += 1
     return min(10, max(1, score))
 
 def extract_image_from_article(url: str) -> str | None:
-    """1. Пробуем взять картинку из статьи"""
+    """Пробуем взять картинку из статьи"""
     try:
         resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
         resp.raise_for_status()
-        # Ищем og:image
-        og_match = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', resp.text, re.IGNORECASE)
-        if og_match:
-            img = og_match.group(1)
-            if img.startswith("http"):
-                logger.info(f"✅ Нашёл картинку в статье: {img[:80]}...")
-                return img
-        # Ищем twitter:image
-        tw_match = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', resp.text, re.IGNORECASE)
-        if tw_match:
-            img = tw_match.group(1)
-            if img.startswith("http"):
-                logger.info(f"✅ Нашёл twitter:image: {img[:80]}...")
-                return img
-    except Exception as e:
-        logger.warning(f"Не смог достать картинку из статьи: {e}")
+        # og:image
+        m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', resp.text, re.I)
+        if m and m.group(1).startswith("http"):
+            return m.group(1)
+        # twitter:image
+        m = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', resp.text, re.I)
+        if m and m.group(1).startswith("http"):
+            return m.group(1)
+        # Первая img с расширением картинки
+        m = re.search(r'<img[^>]+src="([^"]+\.(?:jpg|jpeg|png|webp))"', resp.text, re.I)
+        if m and m.group(1).startswith("http"):
+            return m.group(1)
+    except Exception:
+        pass
     return None
 
-def download_image(url: str) -> BytesIO | None:
-    """Скачивает картинку и возвращает как BytesIO"""
+def download_image_bytes(url: str) -> BytesIO | None:
+    """Скачивает картинку"""
     try:
         resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
         resp.raise_for_status()
         return BytesIO(resp.content)
-    except Exception as e:
-        logger.warning(f"Не смог скачать картинку {url[:60]}: {e}")
+    except Exception:
         return None
 
-def get_fallback_image_bytes() -> BytesIO:
-    """Создаёт простую заглушку"""
-    # Скачиваем надёжную картинку с Pixabay
-    fallback_urls = [
-        "https://cdn.pixabay.com/photo/2018/05/29/14/51/game-controller-3439543_640.jpg",
-        "https://cdn.pixabay.com/photo/2017/04/29/12/56/gaming-2271516_640.jpg",
-        "https://cdn.pixabay.com/photo/2016/10/27/14/53/game-1773966_640.jpg",
-    ]
-    for url in fallback_urls:
-        img = download_image(url)
-        if img:
-            return img
-    # Если вообще ничего не скачалось — создаём пустую картинку
-    from PIL import Image
-    img = Image.new('RGB', (640, 360), color=(30, 30, 40))
+def create_placeholder() -> BytesIO:
+    """Создаёт простую картинку-заглушку"""
+    img = Image.new('RGB', (640, 360), color=(44, 62, 80))
     bio = BytesIO()
-    img.save(bio, 'JPEG')
+    img.save(bio, 'JPEG', quality=85)
     bio.seek(0)
     return bio
 
-def get_news_image_bytes(title: str, link: str) -> BytesIO:
-    """Получить картинку как BytesIO"""
+def get_image_for_news(title: str, link: str) -> BytesIO:
+    """Получает картинку: статья → AI → заглушка"""
     # 1. Из статьи
     img_url = extract_image_from_article(link)
     if img_url:
-        img_bytes = download_image(img_url)
-        if img_bytes:
-            logger.info("✅ Отправляю картинку из статьи")
-            return img_bytes
+        logger.info(f"✅ Картинка из статьи: {img_url[:80]}...")
+        img = download_image_bytes(img_url)
+        if img:
+            return img
     
-    # 2. Пробуем AI
+    # 2. AI (с задержкой чтобы не получить 429)
     try:
         prompt = urllib.parse.quote(f"game news {title[:60]}")
-        ai_url = f"https://image.pollinations.ai/prompt/{prompt}?width=640&height=360"
+        ai_url = f"https://image.pollinations.ai/prompt/{prompt}?width=640&height=360&nologo=true"
         logger.info(f"🤖 Пробую AI: {ai_url[:80]}...")
-        img_bytes = download_image(ai_url)
-        if img_bytes:
-            logger.info("✅ Отправляю AI-картинку")
-            return img_bytes
+        time.sleep(0.5)  # Задержка между запросами
+        img = download_image_bytes(ai_url)
+        if img:
+            logger.info("✅ AI-картинка готова")
+            return img
     except Exception as e:
-        logger.warning(f"AI не получился: {e}")
+        logger.warning(f"AI не сработал: {e}")
     
-    # 3. Запасная
-    logger.info("📦 Использую запасную картинку")
-    return get_fallback_image_bytes()
+    # 3. Заглушка
+    logger.info("📦 Использую заглушку")
+    return create_placeholder()
 
 def parse_entry(entry, cutoff_utc: datetime) -> dict | None:
     pub_struct = entry.get("published_parsed") or entry.get("updated_parsed")
@@ -162,16 +144,12 @@ def parse_entry(entry, cutoff_utc: datetime) -> dict | None:
         return None
     if pub_dt < cutoff_utc:
         return None
-    title_en = entry.get("title", "Без заголовка")
-    desc_en = clean_html(entry.get("description", "") or entry.get("summary", ""))[:500]
-    link = entry.get("link", "#")
-    importance = calculate_importance(title_en, desc_en)
     return {
-        "title_en": title_en,
-        "desc_en": desc_en,
-        "link": link,
+        "title_en": entry.get("title", "Без заголовка"),
+        "desc_en": clean_html(entry.get("description", "") or entry.get("summary", ""))[:300],
+        "link": entry.get("link", "#"),
         "date_utc": pub_dt,
-        "importance": importance,
+        "importance": calculate_importance(entry.get("title", ""), entry.get("description", "")),
     }
 
 def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) -> list:
@@ -190,7 +168,7 @@ def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) ->
         if articles:
             logger.info(f"{source_name}: +{len(articles)} новостей")
     except Exception as e:
-        logger.warning(f"Ошибка загрузки {source_name}: {e}")
+        logger.warning(f"Ошибка {source_name}: {e}")
     return articles
 
 def fetch_category_news(category: str, limit=10) -> list:
@@ -214,51 +192,35 @@ def build_caption(article: dict, idx: int) -> str:
     title_ru = escape_html(translate_text(article["title_en"]))
     desc_ru = escape_html(translate_text(article["desc_en"]))[:200]
     imp = article["importance"]
-    if imp >= 8:
-        emoji = "🔴🔥"
-    elif imp >= 6:
-        emoji = "🟠⚠️"
-    elif imp >= 4:
-        emoji = "🟡📌"
-    else:
-        emoji = "⚪📰"
+    emoji = "🔴" if imp >= 7 else "🟡" if imp >= 4 else "⚪"
     msk_time = article["date_utc"].astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
-    caption = (
+    return (
         f"{emoji} <b>{idx}. {title_ru}</b>\n\n"
         f"📝 {desc_ru}\n\n"
         f"📅 {msk_time} (МСК) | 📰 {article['source']}\n"
         f"⭐ Важность: {imp}/10\n\n"
         f"🔗 <a href='{article['link']}'>Читать полностью</a>"
     )
-    return caption
 
 # ==================== Telegram API ====================
-def send_message(chat_id: int, text: str, parse_mode: str = "HTML"):
+def send_message(chat_id: int, text: str):
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-            "disable_web_page_preview": True,
-        }
-        requests.post(url, json=payload, timeout=15)
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
+            timeout=15
+        )
     except Exception as e:
         logger.error(f"sendMessage: {e}")
 
 def send_photo_bytes(chat_id: int, image_bytes: BytesIO, caption: str):
-    """Отправляет фото как файл (multipart/form-data)"""
+    """Отправляет фото как файл"""
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
         files = {"photo": ("image.jpg", image_bytes, "image/jpeg")}
-        data = {
-            "chat_id": chat_id,
-            "caption": caption[:1024],
-            "parse_mode": "HTML",
-        }
-        resp = requests.post(url, files=files, data=data, timeout=20)
-        if resp.status_code != 200:
-            logger.warning(f"Фото не отправлено: {resp.text}")
+        data = {"chat_id": chat_id, "caption": caption[:1024], "parse_mode": "HTML"}
+        r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", files=files, data=data, timeout=20)
+        if r.status_code != 200:
+            logger.warning(f"Фото не отправлено: {r.text}")
             send_message(chat_id, caption[:1000])
     except Exception as e:
         logger.error(f"sendPhoto: {e}")
@@ -266,33 +228,28 @@ def send_photo_bytes(chat_id: int, image_bytes: BytesIO, caption: str):
 
 def show_keyboard(chat_id: int):
     keyboard = {
-        "keyboard": [
-            ["🎮 Топ 10 новостей Brawl Stars", "🎮 Топ 10 новостей Roblox"]
-        ],
+        "keyboard": [["🎮 Топ 10 новостей Brawl Stars", "🎮 Топ 10 новостей Roblox"]],
         "resize_keyboard": True,
     }
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": "<b>🎮 Выбери игру для новостей:</b>",
-        "reply_markup": keyboard,
-        "parse_mode": "HTML",
-    }
-    requests.post(url, json=payload, timeout=10)
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": chat_id, "text": "🎮 <b>Выбери игру:</b>", "reply_markup": keyboard, "parse_mode": "HTML"},
+        timeout=10
+    )
 
-def send_category_news(chat_id: int, category: str, category_display_name: str):
-    send_message(chat_id, f"🔍 Загружаю последние новости для <b>{category_display_name}</b>... ⏳")
+def send_category_news(chat_id: int, category: str, name: str):
+    send_message(chat_id, f"🔍 Загружаю новости <b>{name}</b>...")
     articles = fetch_category_news(category)
     if not articles:
-        send_message(chat_id, f"😕 Новостей для {category_display_name} пока нет.")
+        send_message(chat_id, f"😕 Новостей нет.")
         show_keyboard(chat_id)
         return
     for i, art in enumerate(articles, 1):
-        img_bytes = get_news_image_bytes(art["title_en"], art["link"])
+        img = get_image_for_news(art["title_en"], art["link"])
         caption = build_caption(art, i)
-        send_photo_bytes(chat_id, img_bytes, caption)
+        send_photo_bytes(chat_id, img, caption)
         time.sleep(0.3)
-    send_message(chat_id, f"✅ Показано <b>{len(articles)}</b> новостей.")
+    send_message(chat_id, f"✅ Готово: <b>{len(articles)}</b> новостей.")
     show_keyboard(chat_id)
 
 # ==================== Webhook ====================
@@ -307,16 +264,10 @@ def webhook():
             return "OK", 200
         chat_id = msg["chat"]["id"]
         text = msg.get("text", "")
-        logger.info(f"Получено сообщение: {text} от {chat_id}")
+        logger.info(f"📩 {text} от {chat_id}")
         
         if text == "/start":
-            welcome = (
-                "🎮 <b>Игровой новостной бот</b>\n\n"
-                "📌 Brawl Stars и Roblox\n"
-                "📌 Картинки из новостей\n"
-                "👇 Выбери игру"
-            )
-            send_message(chat_id, welcome)
+            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n👇 Выбери игру:")
             show_keyboard(chat_id)
         elif text == "🎮 Топ 10 новостей Brawl Stars":
             threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
@@ -324,7 +275,7 @@ def webhook():
             threading.Thread(target=send_category_news, args=(chat_id, "roblox", "Roblox"), daemon=True).start()
         return "OK", 200
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Webhook: {e}")
         return "Error", 500
 
 @app.route("/")
@@ -342,14 +293,12 @@ def init_webhook():
             return
         requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
         time.sleep(1)
-        webhook_url = f"{app_url}/webhook"
-        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
+        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={app_url}/webhook", timeout=10)
         logger.info(f"Webhook: {r.json()}")
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"Webhook init: {e}")
 
 init_webhook()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
