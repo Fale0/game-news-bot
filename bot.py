@@ -287,9 +287,9 @@ def webhook():
         if text == "/start":
             send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n👇 Выбери игру:")
             show_keyboard(chat_id)
-        elif text == "🎮 Топ 10 новостей Brawl Stars":
+        elif text == "🎮 Топ 5 новостей Brawl Stars":
             threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
-        elif text == "🎮 Топ 10 новостей Roblox":
+        elif text == "🎮 Топ 5 новостей Roblox":
             threading.Thread(target=send_category_news, args=(chat_id, "roblox", "Roblox"), daemon=True).start()
         return "OK", 200
     except Exception as e:
