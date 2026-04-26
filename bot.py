@@ -9,10 +9,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import feedparser
-from flask import Flask, request  # ← ДОБАВИЛ request
+from flask import Flask, request  # ← request нужен для webhook
 import threading
 
-from openai import OpenAI
+# Дипсик отключён (закомментирован)
+# from openai import OpenAI
 from deep_translator import GoogleTranslator
 
 logging.basicConfig(
@@ -24,18 +25,18 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+# DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")  # отключено
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
-deepseek_client = None
-if DEEPSEEK_API_KEY:
-    deepseek_client = OpenAI(
-        api_key=DEEPSEEK_API_KEY,
-        base_url="https://api.deepseek.com/v1",
-    )
-    logger.info("✅ DeepSeek API подключён")
-else:
-    logger.warning("⚠️ DeepSeek API ключ не найден")
+# deepseek_client = None  # отключено
+# if DEEPSEEK_API_KEY:
+#     deepseek_client = OpenAI(
+#         api_key=DEEPSEEK_API_KEY,
+#         base_url="https://api.deepseek.com/v1",
+#     )
+#     logger.info("✅ DeepSeek API подключён")
+# else:
+#     logger.warning("⚠️ DeepSeek API ключ не найден")
 
 translator = GoogleTranslator(source="en", target="ru")
 
@@ -84,29 +85,9 @@ def calculate_importance(title: str, description: str) -> int:
             score += 1
     return min(10, max(1, score))
 
-def analyze_with_deepseek(title: str, content: str) -> str:
-    if not deepseek_client:
-        return ""
-    try:
-        prompt = f"""Проанализируй новость об игре:
-Заголовок: {title}
-Содержание: {content[:300]}
-
-Напиши кратко:
-💡 Суть: (одно предложение)
-🎯 Значение: (позитивное/нейтральное/негативное)"""
-        response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=120,
-        )
-        return f"\n\n🤖 <b>DeepSeek:</b>\n{response.choices[0].message.content}"
-    except Exception as e:
-        logger.error(f"Ошибка DeepSeek: {e}")
-        return ""
-
+# ===== Функции для картинок =====
 def extract_image_from_article(url: str) -> str | None:
+    """1. Пробуем взять картинку из статьи (og:image)"""
     try:
         resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
         resp.raise_for_status()
@@ -120,44 +101,52 @@ def extract_image_from_article(url: str) -> str | None:
             if match:
                 img = match.group(1)
                 if img.startswith("http") and "pixel" not in img.lower():
+                    logger.info(f"✅ Нашёл картинку в статье: {img[:80]}...")
                     return img
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Не смог достать картинку из статьи: {e}")
     return None
 
 def get_ai_image(title: str, category: str) -> str | None:
+    """2. Пробуем сгенерировать AI-картинку"""
     try:
         if category == "brawlstars":
-            prompt = f"Brawl Stars game art {title[:60]}"
+            prompt = f"Brawl Stars game mobile art {title[:60]}"
         else:
             prompt = f"Roblox game art {title[:60]}"
         encoded = urllib.parse.quote(prompt)
-        return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=768"
-    except Exception:
-        return None
+        ai_url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=768"
+        logger.info(f"🤖 Пробую AI-картинку: {ai_url[:80]}...")
+        # Проверяем доступность
+        check = requests.head(ai_url, timeout=5)
+        if check.status_code == 200:
+            return ai_url
+    except Exception as e:
+        logger.warning(f"AI-картинка не получилась: {e}")
+    return None
 
 def get_fallback_image(category: str) -> str:
+    """3. Запасная картинка"""
     images = [
         "https://cdn.pixabay.com/photo/2018/05/29/14/51/game-controller-3439543_640.jpg",
         "https://cdn.pixabay.com/photo/2017/04/29/12/56/gaming-2271516_640.jpg",
         "https://cdn.pixabay.com/photo/2016/10/27/14/53/game-1773966_640.jpg",
     ]
-    return random.choice(images)
-
-def is_url_accessible(url: str, timeout: int = 5) -> bool:
-    try:
-        resp = requests.head(url, timeout=timeout, headers=REQUEST_HEADERS)
-        return resp.status_code == 200
-    except Exception:
-        return False
+    chosen = random.choice(images)
+    logger.info(f"📦 Использую запасную картинку: {chosen}")
+    return chosen
 
 def get_news_image(title: str, link: str, category: str) -> str:
-    real_img = extract_image_from_article(link)
-    if real_img and is_url_accessible(real_img):
-        return real_img
-    ai_img = get_ai_image(title, category)
-    if ai_img and is_url_accessible(ai_img):
-        return ai_img
+    """Получить картинку: 1) из статьи → 2) AI → 3) запасная"""
+    # 1. Из статьи
+    img = extract_image_from_article(link)
+    if img:
+        return img
+    # 2. AI-генерация
+    img = get_ai_image(title, category)
+    if img:
+        return img
+    # 3. Запасная
     return get_fallback_image(category)
 
 def parse_entry(entry, cutoff_utc: datetime, min_importance: int = 1) -> dict | None:
@@ -240,8 +229,9 @@ def build_caption(article: dict, idx: int) -> str:
         f"⭐ Важность: {imp}/10\n\n"
         f"🔗 <a href='{article['link']}'>Читать полностью</a>"
     )
-    if deepseek_client:
-        caption += analyze_with_deepseek(title_ru, desc_ru)
+    # Дипсик отключён
+    # if deepseek_client:
+    #     caption += analyze_with_deepseek(title_ru, desc_ru)
     return caption
 
 # ==================== Telegram API ====================
@@ -261,21 +251,24 @@ def send_message(chat_id: int, text: str, parse_mode: str = "HTML"):
         logger.error(f"sendMessage исключение: {e}")
 
 def send_photo(chat_id: int, image_url: str, caption: str):
+    """Отправляет фото. Если не получается — шлёт текст с картинкой как ссылкой"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
         payload = {
             "chat_id": chat_id,
             "photo": image_url,
-            "caption": caption,
+            "caption": caption[:1024],  # Telegram обрезает длинные подписи
             "parse_mode": "HTML",
         }
         resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code != 200:
             logger.warning(f"Фото не отправлено: {resp.text}")
-            send_message(chat_id, caption)
+            # Отправляем как текст + картинка ссылкой
+            fallback_text = caption[:1000] + f"\n\n🖼 <a href='{image_url}'>Картинка</a>"
+            send_message(chat_id, fallback_text)
     except Exception as e:
         logger.error(f"sendPhoto ошибка: {e}")
-        send_message(chat_id, caption)
+        send_message(chat_id, caption[:1000])
 
 def show_keyboard(chat_id: int):
     keyboard = {
@@ -284,7 +277,6 @@ def show_keyboard(chat_id: int):
         ],
         "resize_keyboard": True,
     }
-    send_message(chat_id, "<b>🎮 Выбери игру для новостей:</b>")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -309,7 +301,7 @@ def send_category_news(chat_id: int, category: str, category_display_name: str):
     send_message(chat_id, f"✅ Показано <b>{len(articles)}</b> новостей.")
     show_keyboard(chat_id)
 
-# ==================== Webhook (основной метод) ====================
+# ==================== Webhook ====================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
@@ -329,7 +321,6 @@ def webhook():
                 "📌 Узнавай последние новости о Brawl Stars и Roblox первым!\n"
                 "📌 Оценка важности, перевод на русский\n"
                 "📌 Картинки: из статьи, AI или сток\n"
-                "📌 Анализ DeepSeek 🧠 (если настроен)\n\n"
                 "👇 <b>Выбери игру на клавиатуре ниже</b>"
             )
             send_message(chat_id, welcome)
@@ -363,14 +354,13 @@ def init_webhook():
             return
         
         # Удаляем старый webhook
-        delete_resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
-        logger.info(f"Старый webhook удалён: {delete_resp.json()}")
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=10)
         time.sleep(1)
         
         # Устанавливаем новый
         webhook_url = f"{app_url}/webhook"
-        set_resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
-        logger.info(f"✅ Webhook установлен: {set_resp.json()}")
+        resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}", timeout=10)
+        logger.info(f"✅ Webhook установлен: {resp.json()}")
         
         # Проверяем
         info_resp = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getWebhookInfo", timeout=10)
@@ -378,10 +368,9 @@ def init_webhook():
     except Exception as e:
         logger.error(f"Ошибка webhook: {e}")
 
-# Запускаем при загрузке модуля
+# Запускаем webhook при загрузке модуля
 init_webhook()
 
-# Для прямого запуска (не используется с gunicorn)
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
