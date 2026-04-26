@@ -33,20 +33,46 @@ REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 }
 
-# ==================== ИСТОЧНИКИ ====================
+# ==================== ИСТОЧНИКИ НОВОСТЕЙ ====================
+# Реальные новостные сайты + Reddit как дополнение
 BRAWL_STARS_FEEDS = [
+    ("Brawl Stars News", "https://news.google.com/rss/search?q=Brawl+Stars+update+new+brawler&hl=en&gl=US&ceid=US:en"),
     ("Brawl Stars Reddit", "https://www.reddit.com/r/Brawlstars/.rss"),
 ]
 
 ROBLOX_FEEDS = [
+    ("Roblox News", "https://news.google.com/rss/search?q=Roblox+update+new+game+event&hl=en&gl=US&ceid=US:en"),
     ("Roblox Reddit", "https://www.reddit.com/r/roblox/.rss"),
 ]
 
-# ============ Функции ============
-def clean_html(raw: str) -> str:
-    if not raw:
+# ============ ИГРОВЫЕ КАРТИНКИ ДЛЯ ЗАГЛУШЕК ============
+BRAWL_STARS_IMAGES = [
+    "https://i.imgur.com/3qV4k6o.jpg",  # Бравл Старс тематика
+    "https://i.imgur.com/J8mXbwN.jpg",
+    "https://i.imgur.com/K9mN2xL.jpg",
+]
+
+ROBLOX_IMAGES = [
+    "https://i.imgur.com/7h5P2mN.jpg",  # Роблокс тематика
+    "https://i.imgur.com/M3kL9pQ.jpg",
+    "https://i.imgur.com/W4nX8rT.jpg",
+]
+
+# ============ Функции очистки ============
+def clean_description(desc: str) -> str:
+    """Очищает описание от Reddit-мусора и HTML"""
+    if not desc:
         return ""
-    return re.sub(r"<.*?>", "", raw)
+    # Удаляем HTML теги
+    desc = re.sub(r"<.*?>", "", desc)
+    # Удаляем "&#32;представлено /u/... [ссылка] [комментарии]"
+    desc = re.sub(r"&#32;.*?\[comments\]", "", desc)
+    desc = re.sub(r"submitted by\s+/u/\S+", "", desc)
+    desc = re.sub(r"\[link\]|\[comments\]", "", desc)
+    desc = re.sub(r"&#32;", " ", desc)
+    # Удаляем множественные пробелы
+    desc = re.sub(r"\s+", " ", desc).strip()
+    return desc[:300]  # Ограничиваем длину
 
 def escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "<").replace(">", ">")
@@ -60,17 +86,49 @@ def translate_text(text: str) -> str:
         logger.warning(f"Ошибка перевода: {e}")
         return text
 
-def calculate_importance(title: str, description: str) -> int:
+# ============ Система релевантности ============
+def calculate_relevance(title: str, description: str, category: str) -> int:
+    """Оценивает новость по релевантности (0-100)"""
     text = (title + " " + description).lower()
-    score = 5
-    high_kw = ["update", "new brawler", "new event", "leak", "official", "release", "launch", "patch", "new game"]
-    for w in high_kw:
-        if w in text:
-            score += 2
-    return min(10, max(1, score))
+    score = 30  # Базовый балл
+    
+    if category == "brawlstars":
+        # Ключевые слова Brawl Stars
+        keywords = {
+            "new brawler": 25, "update": 20, "balance": 15, "skin": 10,
+            "buff": 15, "nerf": 15, "brawl pass": 20, "season": 15,
+            "chromatic": 10, "power league": 15, "esports": 15,
+            "championship": 20, "supercell": 25, "release": 20,
+        }
+    else:  # roblox
+        keywords = {
+            "new game": 25, "update": 20, "event": 20, "roblox studio": 15,
+            " scripting": 10, "building": 15, "avatar": 10,
+            "robux": 15, "premium": 15, "release": 20, "launch": 20,
+            "rp": 15, "roleplay": 10, "obby": 10, "tycoon": 10,
+        }
+    
+    for word, points in keywords.items():
+        if word in text:
+            score += points
+    
+    # Штраф за нерелевантный контент
+    bad_words = ["meme", "fanart", "fan art", "irl", "my girlfriend", "look at this"]
+    for word in bad_words:
+        if word in text:
+            score -= 20
+    
+    # Бонус за свежесть упоминаний
+    fresh_words = ["breaking", "just announced", "new update", "just released"]
+    for word in fresh_words:
+        if word in text:
+            score += 15
+    
+    return max(0, min(100, score))
 
+# ============ Работа с картинками ============
 def extract_image_from_article(url: str) -> str | None:
-    """Пробуем взять картинку из статьи"""
+    """Извлекает картинку из статьи"""
     try:
         resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
         resp.raise_for_status()
@@ -88,15 +146,7 @@ def extract_image_from_article(url: str) -> str | None:
             logger.info(f"✅ twitter:image: {m.group(1)[:80]}")
             return m.group(1)
         
-        # Любая картинка из статьи
-        imgs = re.findall(r'<img[^>]+src="([^"]+)"', html, re.I)
-        for img in imgs:
-            if any(img.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif']):
-                if img.startswith("http") and "icon" not in img.lower() and "avatar" not in img.lower() and "logo" not in img.lower():
-                    logger.info(f"✅ img из статьи: {img[:80]}")
-                    return img
-        
-        # Ссылка на Reddit картинку (i.redd.it или preview.redd.it)
+        # Reddit картинки
         m = re.search(r'https?://(?:i\.redd\.it|preview\.redd\.it)/[^"\s]+', html, re.I)
         if m:
             logger.info(f"✅ Reddit картинка: {m.group(0)[:80]}")
@@ -111,48 +161,55 @@ def download_image_bytes(url: str) -> BytesIO | None:
     try:
         resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
         resp.raise_for_status()
-        return BytesIO(resp.content)
+        if len(resp.content) > 500:  # Проверяем что это реальная картинка
+            return BytesIO(resp.content)
     except Exception:
-        return None
+        pass
+    return None
 
-def create_placeholder() -> BytesIO:
-    """Создаёт простую картинку-заглушку"""
-    img = Image.new('RGB', (640, 360), color=(44, 62, 80))
+def get_fallback_image_bytes(category: str) -> BytesIO:
+    """Запасная игровая картинка"""
+    images = BRAWL_STARS_IMAGES if category == "brawlstars" else ROBLOX_IMAGES
+    for url in images:
+        img = download_image_bytes(url)
+        if img:
+            logger.info(f"📦 Игровая заглушка")
+            return img
+    # Если не скачалось — создаём цветную заглушку
+    color = (76, 175, 80) if category == "brawlstars" else (33, 150, 243)
+    img = Image.new('RGB', (640, 360), color=color)
     bio = BytesIO()
     img.save(bio, 'JPEG', quality=85)
     bio.seek(0)
     return bio
 
-def get_image_for_news(title: str, link: str) -> BytesIO:
-    """Получает картинку: статья → AI → заглушка"""
+def get_image_for_news(title: str, link: str, category: str) -> BytesIO:
+    """Получает картинку: статья → AI → игровая заглушка"""
     # 1. Из статьи
     img_url = extract_image_from_article(link)
     if img_url:
         img = download_image_bytes(img_url)
         if img:
-            logger.info("✅ Картинка из статьи готова")
+            logger.info("✅ Картинка из статьи")
             return img
     
-    # 2. AI с большим таймаутом
+    # 2. AI-генерация
     try:
-        prompt = urllib.parse.quote(f"game news {title[:60]}")
+        prompt = urllib.parse.quote(f"{'Brawl Stars' if category == 'brawlstars' else 'Roblox'} game news {title[:60]}")
         ai_url = f"https://image.pollinations.ai/prompt/{prompt}?width=640&height=360&nologo=true"
         logger.info(f"🤖 AI запрос...")
-        # Увеличиваем таймаут до 30 секунд
         resp = requests.get(ai_url, timeout=30, headers=REQUEST_HEADERS)
         if resp.status_code == 200 and len(resp.content) > 1000:
-            logger.info("✅ AI-картинка готова")
+            logger.info("✅ AI-картинка")
             return BytesIO(resp.content)
-        else:
-            logger.warning(f"AI ответ: статус {resp.status_code}, размер {len(resp.content)}")
     except Exception as e:
         logger.warning(f"AI ошибка: {e}")
     
-    # 3. Заглушка
-    logger.info("📦 Заглушка")
-    return create_placeholder()
+    # 3. Игровая заглушка
+    return get_fallback_image_bytes(category)
 
-def parse_entry(entry, cutoff_utc: datetime) -> dict | None:
+# ============ Парсинг новостей ============
+def parse_entry(entry, cutoff_utc: datetime, category: str) -> dict | None:
     pub_struct = entry.get("published_parsed") or entry.get("updated_parsed")
     if not pub_struct:
         return None
@@ -162,12 +219,26 @@ def parse_entry(entry, cutoff_utc: datetime) -> dict | None:
         return None
     if pub_dt < cutoff_utc:
         return None
+    
+    title_en = entry.get("title", "Без заголовка")
+    desc_en = clean_description(
+        entry.get("description", "") or 
+        entry.get("summary", "") or 
+        entry.get("content", [{"value": ""}])[0].get("value", "")
+    )
+    link = entry.get("link", "#")
+    relevance = calculate_relevance(title_en, desc_en, category)
+    
+    # Пропускаем совсем нерелевантные
+    if relevance < 30:
+        return None
+    
     return {
-        "title_en": entry.get("title", "Без заголовка"),
-        "desc_en": clean_html(entry.get("description", "") or entry.get("summary", ""))[:300],
-        "link": entry.get("link", "#"),
+        "title_en": title_en,
+        "desc_en": desc_en,
+        "link": link,
         "date_utc": pub_dt,
-        "importance": calculate_importance(entry.get("title", ""), entry.get("description", "")),
+        "relevance": relevance,
     }
 
 def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) -> list:
@@ -176,8 +247,8 @@ def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) ->
         resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
         resp.raise_for_status()
         feed = feedparser.parse(resp.content)
-        for entry in feed.entries[:20]:
-            parsed = parse_entry(entry, cutoff)
+        for entry in feed.entries[:25]:
+            parsed = parse_entry(entry, cutoff, category)
             if not parsed:
                 continue
             parsed["source"] = source_name
@@ -189,34 +260,43 @@ def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) ->
         logger.warning(f"Ошибка {source_name}: {e}")
     return articles
 
-def fetch_category_news(category: str, limit=5) -> list:
+def fetch_category_news(category: str, limit=7) -> list:
+    """Собирает топ-7 самых релевантных новостей"""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=168)
     all_articles = []
     feeds = BRAWL_STARS_FEEDS if category == "brawlstars" else ROBLOX_FEEDS
+    
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(fetch_source, name, url, cutoff, category) for name, url in feeds]
         for f in as_completed(futures):
             all_articles.extend(f.result())
+    
+    # Удаление дубликатов
     seen = set()
     unique = []
     for a in all_articles:
-        if a["title_en"] not in seen:
-            seen.add(a["title_en"])
+        key = a["title_en"].lower()
+        if key not in seen:
+            seen.add(key)
             unique.append(a)
-    unique.sort(key=lambda x: (x["importance"], x["date_utc"]), reverse=True)
+    
+    # Сортировка по релевантности И свежести
+    unique.sort(key=lambda x: (x["relevance"], x["date_utc"]), reverse=True)
+    
+    logger.info(f"🎯 {category}: отобрано {len(unique[:limit])} из {len(unique)}")
     return unique[:limit]
 
 def build_caption(article: dict, idx: int) -> str:
     title_ru = escape_html(translate_text(article["title_en"]))
     desc_ru = escape_html(translate_text(article["desc_en"]))[:200]
-    imp = article["importance"]
-    emoji = "🔴" if imp >= 7 else "🟡" if imp >= 4 else "⚪"
+    rel = article["relevance"]
+    emoji = "🔴" if rel >= 70 else "🟡" if rel >= 40 else "⚪"
     msk_time = article["date_utc"].astimezone(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M")
     return (
         f"{emoji} <b>{idx}. {title_ru}</b>\n\n"
         f"📝 {desc_ru}\n\n"
         f"📅 {msk_time} (МСК) | 📰 {article['source']}\n"
-        f"⭐ Важность: {imp}/10\n\n"
+        f"⭐ Релевантность: {rel}/100\n\n"
         f"🔗 <a href='{article['link']}'>Читать полностью</a>"
     )
 
@@ -246,7 +326,7 @@ def send_photo_bytes(chat_id: int, image_bytes: BytesIO, caption: str):
 
 def show_keyboard(chat_id: int):
     keyboard = {
-        "keyboard": [["🎮 Топ 5 новостей Brawl Stars", "🎮 Топ 5 новостей Roblox"]],
+        "keyboard": [["🎮 Топ 7 новостей Brawl Stars", "🎮 Топ 7 новостей Roblox"]],
         "resize_keyboard": True,
     }
     requests.post(
@@ -256,18 +336,18 @@ def show_keyboard(chat_id: int):
     )
 
 def send_category_news(chat_id: int, category: str, name: str):
-    send_message(chat_id, f"🔍 Загружаю новости <b>{name}</b>...")
-    articles = fetch_category_news(category)
+    send_message(chat_id, f"🔍 Собираю топ-7 новостей <b>{name}</b>...")
+    articles = fetch_category_news(category, limit=7)
     if not articles:
         send_message(chat_id, f"😕 Новостей нет.")
         show_keyboard(chat_id)
         return
     for i, art in enumerate(articles, 1):
-        img = get_image_for_news(art["title_en"], art["link"])
+        img = get_image_for_news(art["title_en"], art["link"], category)
         caption = build_caption(art, i)
         send_photo_bytes(chat_id, img, caption)
         time.sleep(0.3)
-    send_message(chat_id, f"✅ Готово: <b>{len(articles)}</b> новостей.")
+    send_message(chat_id, f"✅ Готово: <b>{len(articles)}</b> релевантных новостей.")
     show_keyboard(chat_id)
 
 # ==================== Webhook ====================
@@ -285,11 +365,11 @@ def webhook():
         logger.info(f"📩 {text} от {chat_id}")
         
         if text == "/start":
-            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n👇 Выбери игру:")
+            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n📊 Топ-7 релевантных новостей\n🖼 Картинки из статей или AI\n👇 Выбери игру:")
             show_keyboard(chat_id)
-        elif text == "🎮 Топ 5 новостей Brawl Stars":
+        elif text == "🎮 Топ 7 новостей Brawl Stars":
             threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
-        elif text == "🎮 Топ 5 новостей Roblox":
+        elif text == "🎮 Топ 7 новостей Roblox":
             threading.Thread(target=send_category_news, args=(chat_id, "roblox", "Roblox"), daemon=True).start()
         return "OK", 200
     except Exception as e:
