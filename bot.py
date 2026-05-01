@@ -98,128 +98,158 @@ def calculate_relevance(title: str, description: str, category: str) -> int:
     
     return max(0, min(100, score))
 
-# ============ НОВАЯ СИСТЕМА КАРТИНОК ============
-# Используем несколько бесплатных API для генерации картинок
-def generate_image_pollinations(prompt: str) -> BytesIO | None:
-    """Попытка через Pollinations.ai"""
-    try:
-        encoded = urllib.parse.quote(prompt[:100])
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=640&height=360&nologo=true&seed={random.randint(1,9999)}"
-        resp = requests.get(url, timeout=30, headers=REQUEST_HEADERS)
-        if resp.status_code == 200 and len(resp.content) > 5000:
-            logger.info("✅ Pollinations.ai сработал")
-            return BytesIO(resp.content)
-    except Exception as e:
-        logger.warning(f"Pollinations: {e}")
-    return None
+# ============ ТЕМАТИЧЕСКИЕ КАРТИНКИ ============
+BRAWL_STARS_THEMED = [
+    "https://images.unsplash.com/photo-1612287230202-1ff1d85d1bdf?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1560419015-7c427e8ae0ba?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1552820728-8b83bb6b2cf6?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1605899435973-ca2d1a8431e6?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1493711662062-fa541adb3fc8?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1511512578047-dfb367046420?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1538481199705-c710c4e965fc?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1580327344181-c1163234e5a0?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1593305841991-05c297ba4575?w=640&h=360&fit=crop",
+]
 
-def generate_image_picsum() -> BytesIO:
-    """Картинка с Lorem Picsum (всегда работает)"""
+ROBLOX_THEMED = [
+    "https://images.unsplash.com/photo-1486572788966-cfd3df1f5b42?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1553481187-be93c21490a9?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1579373903781-fd5c0c30c4cd?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1588196749597-9ff075ee6b5b?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1566576912321-d58ddd7a6088?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1551103782-8ab07afd45c1?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1614294148960-9aa740632a87?w=640&h=360&fit=crop",
+    "https://images.unsplash.com/photo-1552820728-8b83bb6b2cf6?w=640&h=360&fit=crop",
+]
+
+_image_cache = {"brawlstars": [], "roblox": []}
+
+def get_random_themed_image(category: str) -> BytesIO:
+    """Тематическая картинка без повторов"""
+    images = BRAWL_STARS_THEMED if category == "brawlstars" else ROBLOX_THEMED
+    cache = _image_cache[category]
+    
+    available = [url for url in images if url not in cache]
+    if not available:
+        cache.clear()
+        available = images[:]
+    
+    url = random.choice(available)
+    cache.append(url)
+    
     try:
-        # Случайный ID чтобы картинки не повторялись
-        img_id = random.randint(1, 1000)
-        url = f"https://picsum.photos/640/360?random={img_id}"
         resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
-        if resp.status_code == 200:
-            logger.info(f"✅ Picsum картинка (id={img_id})")
+        if resp.status_code == 200 and len(resp.content) > 1000:
+            logger.info(f"✅ Тематическая картинка")
             return BytesIO(resp.content)
     except Exception as e:
-        logger.warning(f"Picsum: {e}")
+        logger.warning(f"Не загрузилась: {e}")
+    
+    return generate_gradient_placeholder(category)
+
+def generate_ai_image(prompt: str) -> BytesIO | None:
+    """AI-генерация (одна попытка)"""
+    try:
+        encoded = urllib.parse.quote(prompt[:80])
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=640&height=360&nologo=true&seed={random.randint(1,9999)}"
+        resp = requests.get(url, timeout=25, headers=REQUEST_HEADERS)
+        if resp.status_code == 200 and len(resp.content) > 5000:
+            logger.info("✅ AI-картинка")
+            return BytesIO(resp.content)
+    except Exception:
+        pass
     return None
 
-def generate_image_via_placeholder(category: str, title: str = "") -> BytesIO:
-    """Создаёт красивую заглушку с градиентом и текстом"""
-    # Цвета для каждой игры
+def extract_image_from_article(url: str) -> BytesIO | None:
+    """Картинка из статьи"""
+    try:
+        resp = requests.get(url, timeout=8, headers=REQUEST_HEADERS)
+        html = resp.text
+        img_url = None
+        
+        for pattern in [
+            r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"',
+            r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"',
+            r'https?://(?:i\.redd\.it|preview\.redd\.it)/[^"\s]+',
+            r'https?://lh\d+\.googleusercontent\.com/[^"\s]+',
+        ]:
+            m = re.search(pattern, html, re.I)
+            if m:
+                img_url = m.group(1) if m.lastindex else m.group(0)
+                break
+        
+        if img_url and img_url.startswith("http") and "pixel" not in img_url:
+            img_resp = requests.get(img_url, timeout=10, headers=REQUEST_HEADERS)
+            if img_resp.status_code == 200 and len(img_resp.content) > 500:
+                logger.info("✅ Картинка из статьи")
+                return BytesIO(img_resp.content)
+    except Exception:
+        pass
+    return None
+
+def generate_gradient_placeholder(category: str, title: str = "") -> BytesIO:
+    """Градиентная заглушка"""
     if category == "brawlstars":
-        color1, color2 = (255, 200, 0), (255, 100, 0)  # Золотой/оранжевый
+        color1, color2 = (255, 200, 0), (255, 80, 0)
         game_name = "BRAWL STARS"
     else:
-        color1, color2 = (0, 150, 255), (0, 50, 200)  # Синий градиент
+        color1, color2 = (0, 150, 255), (0, 50, 180)
         game_name = "ROBLOX"
     
     img = Image.new('RGB', (640, 360))
     draw = ImageDraw.Draw(img)
     
-    # Градиент
     for y in range(360):
-        r = int(color1[0] + (color2[0] - color1[0]) * y / 360)
-        g = int(color1[1] + (color2[1] - color1[1]) * y / 360)
-        b = int(color1[2] + (color2[2] - color1[2]) * y / 360)
+        ratio = y / 360
+        r = int(color1[0] + (color2[0] - color1[0]) * ratio)
+        g = int(color1[1] + (color2[1] - color1[1]) * ratio)
+        b = int(color1[2] + (color2[2] - color1[2]) * ratio)
         draw.line([(0, y), (640, y)], fill=(r, g, b))
     
-    # Текст
     try:
-        font_large = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 50)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+        font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
     except:
-        font_large = ImageFont.load_default()
+        font_big = ImageFont.load_default()
         font_small = ImageFont.load_default()
     
-    # Название игры
-    bbox = draw.textbbox((0, 0), game_name, font=font_large)
-    w = bbox[2] - bbox[0]
-    draw.text((320 - w/2, 120), game_name, fill=(255, 255, 255), font=font_large)
+    bbox = draw.textbbox((0, 0), game_name, font=font_big)
+    draw.text((320 - (bbox[2]-bbox[0])/2, 110), game_name, fill=(255, 255, 255), font=font_big)
     
-    # Заголовок новости (обрезанный)
     if title:
-        title_short = title[:50] + "..." if len(title) > 50 else title
-        bbox = draw.textbbox((0, 0), title_short, font=font_small)
-        w = bbox[2] - bbox[0]
-        draw.text((320 - w/2, 200), title_short, fill=(255, 255, 255, 200), font=font_small)
+        short = title[:55] + "..." if len(title) > 55 else title
+        bbox = draw.textbbox((0, 0), short, font=font_small)
+        draw.text((320 - (bbox[2]-bbox[0])/2, 200), short, fill=(255, 255, 255, 220), font=font_small)
     
     bio = BytesIO()
-    img.save(bio, 'JPEG', quality=90)
+    img.save(bio, 'JPEG', quality=85)
     bio.seek(0)
-    logger.info(f"✅ Заглушка с градиентом ({game_name})")
     return bio
 
 def get_image_for_news(title: str, link: str, category: str) -> BytesIO:
     """
     Приоритет:
-    1. Картинка из статьи (og:image)
-    2. AI-генерация (Pollinations.ai) — ОДНА попытка
-    3. Lorem Picsum (случайная красивая картинка)
-    4. Цветная заглушка с текстом
+    1. Картинка из статьи
+    2. AI-генерация
+    3. Тематическая стоковая (без повторов!)
+    4. Градиентная заглушка
     """
     # 1. Из статьи
-    try:
-        resp = requests.get(link, timeout=8, headers=REQUEST_HEADERS)
-        html = resp.text
-        
-        # Ищем og:image
-        m = re.search(r'<meta[^>]*property="og:image"[^>]*content="([^"]+)"', html, re.I)
-        if not m:
-            m = re.search(r'<meta[^>]*name="twitter:image"[^>]*content="([^"]+)"', html, re.I)
-        if not m:
-            m = re.search(r'https?://(?:i\.redd\.it|preview\.redd\.it)/[^"\s]+', html, re.I)
-        if not m:
-            m = re.search(r'https?://lh\d+\.googleusercontent\.com/[^"\s]+', html, re.I)
-        
-        if m:
-            img_url = m.group(1) if m.lastindex is None else m.group(0)
-            if img_url.startswith("http"):
-                try:
-                    img_resp = requests.get(img_url, timeout=10, headers=REQUEST_HEADERS)
-                    if img_resp.status_code == 200 and len(img_resp.content) > 500:
-                        logger.info("✅ Картинка из статьи")
-                        return BytesIO(img_resp.content)
-                except:
-                    pass
-    except:
-        pass
+    img = extract_image_from_article(link)
+    if img:
+        return img
     
-    # 2. AI (одна быстрая попытка)
-    ai_img = generate_image_pollinations(f"{'Brawl Stars' if category == 'brawlstars' else 'Roblox'} game screenshot")
-    if ai_img:
-        return ai_img
+    # 2. AI
+    game = "Brawl Stars" if category == "brawlstars" else "Roblox"
+    img = generate_ai_image(f"{game} game screenshot")
+    if img:
+        return img
     
-    # 3. Lorem Picsum (случайные красивые фото)
-    picsum_img = generate_image_picsum()
-    if picsum_img:
-        return picsum_img
-    
-    # 4. Заглушка с градиентом
-    return generate_image_via_placeholder(category, title)
+    # 3. Тематическая стоковая
+    return get_random_themed_image(category)
 
 # ============ Парсинг новостей ============
 def parse_entry(entry, cutoff_utc: datetime, category: str) -> dict | None:
@@ -373,7 +403,7 @@ def webhook():
         logger.info(f"📩 {text} от {chat_id}")
         
         if text == "/start":
-            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n📊 Топ-7 релевантных новостей\n🖼 Картинки из статей/AI/Picsum\n👇 Выбери игру:")
+            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n📊 Топ-7 релевантных новостей\n🖼 Тематические картинки\n👇 Выбери игру:")
             show_keyboard(chat_id)
         elif text == "🎮 Топ 7 новостей Brawl Stars":
             threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
