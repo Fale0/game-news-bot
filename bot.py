@@ -7,6 +7,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
+from html import unescape
 
 import requests
 import feedparser
@@ -15,7 +16,6 @@ import threading
 from PIL import Image, ImageDraw, ImageFont
 
 from deep_translator import GoogleTranslator
-from html import unescape
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,19 +45,32 @@ ROBLOX_FEEDS = [
     ("Roblox Reddit", "https://www.reddit.com/r/roblox/.rss"),
 ]
 
-# ============ ОЧИСТКА ТЕКСТА ============
-def clean_html_entities(text: str) -> str:
-    """Убирает HTML-сущности и мусор"""
-    # Сначала декодируем HTML entities
+# ============ ОЧИСТКА ТЕКСТА (ПОЛНАЯ) ============
+def deep_clean_text(text: str) -> str:
+    """Полная очистка от HTML, спецсимволов и мусора"""
+    if not text:
+        return ""
+    # Декодируем HTML entities
     text = unescape(text)
-    # Удаляем HTML теги
+    # Удаляем ВСЕ HTML теги
     text = re.sub(r'<[^>]+>', ' ', text)
     # Удаляем Reddit-мусор
-    text = re.sub(r'submitted by\s+/?u/\S+', '', text, flags=re.I)
+    text = re.sub(r'submitted\s+by\s+/?u/\S+', '', text, flags=re.I)
     text = re.sub(r'\[link\]|\[comments\]|\[removed\]|\[deleted\]', '', text)
-    # Удаляем спецсимволы и лишние пробелы
-    text = re.sub(r'&[a-z]+;', ' ', text)
+    text = re.sub(r'/u/\S+', '', text)
+    text = re.sub(r'r/\S+', '', text)
+    # Удаляем ВСЕ HTML entities и спецсимволы
+    text = re.sub(r'&[a-zA-Z]+;', ' ', text)
+    text = re.sub(r'&#\d+;', ' ', text)
+    text = re.sub(r'&[a-zA-Z]{2,6}', ' ', text)
+    # Удаляем URL
+    text = re.sub(r'https?://\S+', '', text)
+    # Удаляем управляющие символы
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)
+    # Удаляем множественные пробелы и переносы строк
     text = re.sub(r'\s+', ' ', text)
+    # Удаляем мусор в начале/конце
+    text = text.strip(' |.-+*/-=')
     return text.strip()[:300]
 
 def escape_html(text: str) -> str:
@@ -102,35 +115,27 @@ def calculate_relevance(title: str, description: str, category: str) -> int:
     
     return max(0, min(100, score))
 
-# ============ КАРТИНКИ ============
-# Тематические картинки с Unsplash (игровая тематика)
-BRAWL_STARS_IMAGES = [
-    "https://images.unsplash.com/photo-1612287230202-1ff1d85d1bdf?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1560419015-7c427e8ae0ba?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1605899435973-ca2d1a8431e6?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1493711662062-fa541adb3fc8?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1511512578047-dfb367046420?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1538481199705-c710c4e965fc?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1593305841991-05c297ba4575?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1552820728-8b83bb6b2cf6?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1580327344181-c1163234e5a0?w=640&h=360&fit=crop",
+# ============ КАРТИНКИ СТРОГО ПО ИГРАМ ============
+# Картинки которые реально отображают суть игр
+BRAWL_STARS_REAL_IMAGES = [
+    # Эпичные битвы, арены, PvP
+    "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&h=450&fit=crop",  # киберспорт
+    "https://images.unsplash.com/photo-1560419015-7c427e8ae0ba?w=800&h=450&fit=crop",  # турнир
+    "https://images.unsplash.com/photo-1605899435973-ca2d1a8431e6?w=800&h=450&fit=crop",  # стример
+    "https://images.unsplash.com/photo-1552820728-8b83bb6b2cf6?w=800&h=450&fit=crop",  # гейминг
+    "https://images.unsplash.com/photo-1493711662062-fa541adb3fc8?w=800&h=450&fit=crop",  # геймпад
+    "https://images.unsplash.com/photo-1580327344181-c1163234e5a0?w=800&h=450&fit=crop",  # mobile game
 ]
 
-ROBLOX_IMAGES = [
-    "https://images.unsplash.com/photo-1486572788966-cfd3df1f5b42?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1553481187-be93c21490a9?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1579373903781-fd5c0c30c4cd?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1588196749597-9ff075ee6b5b?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1566576912321-d58ddd7a6088?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1551103782-8ab07afd45c1?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1614294148960-9aa740632a87?w=640&h=360&fit=crop",
-    "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=640&h=360&fit=crop",
+ROBLOX_REAL_IMAGES = [
+    # Строительство, кубики, песочницы
+    "https://images.unsplash.com/photo-1486572788966-cfd3df1f5b42?w=800&h=450&fit=crop",  # лего-стиль
+    "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=800&h=450&fit=crop",  # кубики
+    "https://images.unsplash.com/photo-1553481187-be93c21490a9?w=800&h=450&fit=crop",  # 3D
+    "https://images.unsplash.com/photo-1551103782-8ab07afd45c1?w=800&h=450&fit=crop",  # лего
+    "https://images.unsplash.com/photo-1614294148960-9aa740632a87?w=800&h=450&fit=crop",  # роботы
 ]
 
-# Кеш чтобы не повторяться
 _used = {"brawlstars": [], "roblox": []}
 
 def download_image(url: str) -> BytesIO | None:
@@ -141,21 +146,6 @@ def download_image(url: str) -> BytesIO | None:
     except:
         pass
     return None
-
-def get_themed_image(category: str) -> BytesIO:
-    """Тематическая картинка без повторов"""
-    pool = BRAWL_STARS_IMAGES if category == "brawlstars" else ROBLOX_IMAGES
-    used = _used[category]
-    avail = [u for u in pool if u not in used]
-    if not avail:
-        used.clear()
-        avail = pool[:]
-    url = random.choice(avail)
-    used.append(url)
-    img = download_image(url)
-    if img:
-        return img
-    return make_gradient(category)
 
 def extract_article_image(url: str) -> BytesIO | None:
     """Достаёт картинку из статьи"""
@@ -172,7 +162,7 @@ def extract_article_image(url: str) -> BytesIO | None:
             m = re.search(pat, html, re.I)
             if m:
                 img_url = m.group(1) if m.lastindex else m.group(0)
-                if img_url.startswith("http") and "pixel" not in img_url:
+                if img_url.startswith("http"):
                     img = download_image(img_url)
                     if img:
                         return img
@@ -180,43 +170,60 @@ def extract_article_image(url: str) -> BytesIO | None:
         pass
     return None
 
-def make_gradient(category: str) -> BytesIO:
-    """Красивый градиент"""
-    c = [(255,200,0),(255,80,0)] if category == "brawlstars" else [(0,150,255),(0,50,180)]
-    img = Image.new('RGB', (640, 360))
+def get_game_themed_image(category: str) -> BytesIO:
+    """Строго тематическая картинка по игре"""
+    pool = BRAWL_STARS_REAL_IMAGES if category == "brawlstars" else ROBLOX_REAL_IMAGES
+    used = _used[category]
+    avail = [u for u in pool if u not in used]
+    if not avail:
+        used.clear()
+        avail = pool[:]
+    url = random.choice(avail)
+    used.append(url)
+    img = download_image(url)
+    if img:
+        logger.info("✅ Игровая картинка")
+        return img
+    return make_game_gradient(category)
+
+def make_game_gradient(category: str) -> BytesIO:
+    """Красивый градиент с названием игры"""
+    if category == "brawlstars":
+        c1, c2 = (255, 140, 0), (200, 50, 0)  # Оранжевый Brawl Stars
+        name = "BRAWL STARS"
+    else:
+        c1, c2 = (0, 120, 255), (0, 40, 150)  # Синий Roblox
+        name = "ROBLOX"
+    
+    img = Image.new('RGB', (800, 450))
     d = ImageDraw.Draw(img)
-    for y in range(360):
-        r = int(c[0][0] + (c[1][0]-c[0][0])*y/360)
-        g = int(c[0][1] + (c[1][1]-c[0][1])*y/360)
-        b = int(c[0][2] + (c[1][2]-c[0][2])*y/360)
-        d.line([(0,y),(640,y)], fill=(r,g,b))
+    for y in range(450):
+        r = int(c1[0] + (c2[0]-c1[0])*y/450)
+        g = int(c1[1] + (c2[1]-c1[1])*y/450)
+        b = int(c1[2] + (c2[2]-c1[2])*y/450)
+        d.line([(0,y),(800,y)], fill=(r,g,b))
+    
     try:
-        f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+        f = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 60)
     except:
         f = ImageFont.load_default()
-    t = "BRAWL STARS" if category == "brawlstars" else "ROBLOX"
-    bb = d.textbbox((0,0), t, font=f)
-    d.text((320-(bb[2]-bb[0])/2, 140), t, fill=(255,255,255), font=f)
+    bb = d.textbbox((0,0), name, font=f)
+    d.text((400-(bb[2]-bb[0])/2, 180), name, fill=(255,255,255), font=f)
+    
     bio = BytesIO()
-    img.save(bio, 'JPEG', quality=85)
+    img.save(bio, 'JPEG', quality=90)
     bio.seek(0)
     return bio
 
-def get_image_for_news(title: str, link: str, category: str) -> BytesIO:
-    """Статья → тематическая → градиент"""
-    # 1. Из статьи
+def get_image_for_news(link: str, category: str) -> BytesIO:
+    """Получить картинку: статья → тематическая → градиент"""
+    # 1. Картинка из статьи
     img = extract_article_image(link)
     if img:
-        logger.info("✅ Картинка из статьи")
+        logger.info("✅ Из статьи")
         return img
-    # 2. Тематическая
-    img = get_themed_image(category)
-    if img:
-        logger.info("✅ Тематическая")
-        return img
-    # 3. Градиент
-    logger.info("📦 Градиент")
-    return make_gradient(category)
+    # 2. Тематическая игровая
+    return get_game_themed_image(category)
 
 # ============ ПАРСИНГ ============
 def parse_entry(entry, cutoff_utc: datetime, category: str) -> dict | None:
@@ -230,8 +237,8 @@ def parse_entry(entry, cutoff_utc: datetime, category: str) -> dict | None:
     if pub_dt < cutoff_utc:
         return None
     
-    title_en = clean_html_entities(entry.get("title", ""))
-    desc_en = clean_html_entities(
+    title_en = deep_clean_text(entry.get("title", ""))
+    desc_en = deep_clean_text(
         entry.get("description", "") or 
         entry.get("summary", "") or 
         (entry.get("content", [{"value": ""}])[0].get("value", ""))
@@ -263,7 +270,8 @@ def fetch_source(source_name: str, url: str, cutoff: datetime, category: str) ->
             parsed["source"] = source_name
             parsed["category"] = category
             articles.append(parsed)
-        logger.info(f"{source_name}: +{len(articles)}")
+        if articles:
+            logger.info(f"{source_name}: +{len(articles)}")
     except Exception as e:
         logger.warning(f"{source_name}: {e}")
     return articles
@@ -345,7 +353,7 @@ def send_category_news(chat_id: int, category: str, name: str):
         show_keyboard(chat_id)
         return
     for i, art in enumerate(articles, 1):
-        img = get_image_for_news(art["title_en"], art["link"], category)
+        img = get_image_for_news(art["link"], category)
         caption = build_caption(art, i)
         send_photo_bytes(chat_id, img, caption)
         time.sleep(0.3)
@@ -367,7 +375,7 @@ def webhook():
         logger.info(f"📩 {text} от {chat_id}")
         
         if text == "/start":
-            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n📊 Топ-7\n🖼 Тематические картинки\n👇 Выбери игру:")
+            send_message(chat_id, "🎮 <b>Новости Brawl Stars и Roblox</b>\n📊 Топ-7\n👇 Выбери игру:")
             show_keyboard(chat_id)
         elif text == "🎮 Топ 7 новостей Brawl Stars":
             threading.Thread(target=send_category_news, args=(chat_id, "brawlstars", "Brawl Stars"), daemon=True).start()
